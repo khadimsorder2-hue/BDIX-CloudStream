@@ -1,0 +1,8 @@
+{
+    "name": "BDIX CloudStream Repository",
+    "description": "ICC FTP + all BDIX providers - auto-built",
+    "manifestVersion": 1,
+    "pluginLists": [
+      "https://raw.githubusercontent.com/khadimsorder2-hue/BDIX-CloudStream/builds/plugins.json"
+    ]
+}
