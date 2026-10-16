@@ -20,7 +20,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.AppUtils
 import org.json.JSONObject
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
@@ -31,9 +30,10 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * Krx18 (https://krx18.com) - NSFW Dooplay 2.5.22 based erotic movie site
  *
- * Player chain (v2):
+ * Player chain (v3):
  *  1. Dooplay player API: GET /wp-json/dooplayer/v2/{postid}/{type}/{nume}
  *     -> { type: "iframe", embed_url: "https://play.playkrx18.site/play/{hash}" }
+ *     Plain browser headers first (verified), then xhr headers + CloudflareKiller.
  *     (v1 used the legacy /v2/{postid} route which 404s on Dooplay 2.5.22 -> no links)
  *  2. playkrx18 embeds are "9stream" players: page carries AES-GCM encrypted
  *     idfile_enc / idUser_enc constants.
@@ -44,6 +44,16 @@ import javax.crypto.spec.SecretKeySpec
  *      - decrypt data with 9bd30d612d2bb1bda34743f8608e68c4 / z3M9zQ2pX7k4 -> final HLS URL
  *  3. Fallbacks: admin-ajax doo_player_ajax (same embed_url shape) + page iframe scan,
  *     plus loadExtractor for any embed hosts the app already knows.
+ *
+ *  v3 fixes ("no link found" bug):
+ *   - NiceHttp post(data=map) uses FormBody.addEncoded() which does NOT url-encode
+ *     values. The raw base64 payload therefore hit PHP form-parsing with literal
+ *     '+' chars that decoded to spaces -> AES-GCM payload corrupt -> getplay
+ *     rejected every request. The payload value is now URLEncoder.encode()'d.
+ *   - All player JSON parsing switched from Jackson reflection (AppUtils.parseJson
+ *     on a private data class) to org.json.JSONObject (zero reflection).
+ *   - dooplayer / embed-page requests now try the exact verified plain-browser
+ *     headers first and only fall back to xhr headers + CloudflareKiller.
  */
 open class Krx18Provider : MainAPI() {
     override var mainUrl = "https://krx18.com"
@@ -86,6 +96,9 @@ open class Krx18Provider : MainAPI() {
         "Accept" to "application/json, text/javascript, */*; q=0.01",
         "Referer" to "$mainUrl/"
     )
+
+    // The exact headers the verified curl flow used: modern UA + nothing else.
+    private val plainApiHeaders = mapOf("User-Agent" to UA)
 
     // ---------------- ALL genres ----------------
     override val mainPage = mainPageOf(
@@ -282,15 +295,16 @@ open class Krx18Provider : MainAPI() {
         }
     }
 
-    // ---------------- player DTOs ----------------
-    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
-    private data class PlayerResp(
-        val status: String? = null,
-        val type: String? = null,
-        val embed_url: String? = null,
-        val data: String? = null,
-        val msg: String? = null
-    )
+    // ---------------- player JSON helpers (org.json: no reflection) ----------------
+    private fun parseEmbedUrl(txt: String): String? {
+        return try {
+            val t = txt.trim()
+            if (!t.startsWith("{")) return null
+            JSONObject(t).optString("embed_url", "").trim().takeIf { it.startsWith("http") }
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     private fun extractIframeSrc(html: String): List<String> {
         val out = mutableListOf<String>()
@@ -301,13 +315,27 @@ open class Krx18Provider : MainAPI() {
         return out
     }
 
-    /**
-     * Resolve a play.playkrx18.site (9stream) embed page to a final HLS url.
-     * Chain: embed page -> decrypt idfile/idUser -> AES-GCM payload -> getplay -> decrypt response.
-     */
+    /** Embed page html: plain fetch first, then CloudflareKiller + referer retry. */
+    private suspend fun fetchEmbedPage(embedUrl: String): String? {
+        try {
+            val t = app.get(embedUrl, headers = plainApiHeaders).text
+            if (t.contains("idfile_enc")) return t
+        } catch (e: Exception) {
+        }
+        return try {
+            app.get(
+                embedUrl,
+                headers = plainApiHeaders + mapOf("Referer" to "$mainUrl/"),
+                interceptor = cfKiller
+            ).text
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private suspend fun resolveNineStream(embedUrl: String): String? {
         return try {
-            val embedHtml = app.get(embedUrl, headers = headers, interceptor = cfKiller).text
+            val embedHtml = fetchEmbedPage(embedUrl) ?: return null
 
             val idfileEnc = Regex("idfile_enc\\s*=\\s*[\"']([^\"']+)[\"']").find(embedHtml)?.groupValues?.get(1)
                 ?: return null
@@ -326,6 +354,13 @@ open class Krx18Provider : MainAPI() {
 
             val dataB64 = aesGcmEncryptToB64(payload, K_PAYLOAD, IV_PAYLOAD) ?: return null
 
+            // CRITICAL: NiceHttp's post(data = map) builds the form body with
+            // FormBody.Builder().addEncoded(k, v) - i.e. values are sent AS-IS.
+            // Raw base64 contains '+' '/' '=' and PHP's form parser turns '+' into
+            // a space, corrupting the AES-GCM payload -> getplay always failed.
+            // URL-encode the value ourselves so it survives addEncoded untouched.
+            val dataEncoded = URLEncoder.encode(dataB64, "UTF-8")
+
             val apiHeaders = mapOf(
                 "User-Agent" to UA,
                 "Content-Type" to "application/x-www-form-urlencoded",
@@ -335,15 +370,17 @@ open class Krx18Provider : MainAPI() {
             )
             val respTxt = app.post(
                 NINE_STREAM_API,
-                data = mapOf("data" to dataB64),
+                data = mapOf("data" to dataEncoded),
                 headers = apiHeaders
-            ).text
+            ).text.trim()
 
-            val resp = AppUtils.parseJson<PlayerResp>(respTxt) ?: return null
-            if (resp.status != "success") return null
-            val blob = resp.data ?: return null
+            if (!respTxt.startsWith("{")) return null
+            val resp = JSONObject(respTxt)
+            if (resp.optString("status", "") != "success") return null
+            val blob = resp.optString("data", "")
+            if (blob.isEmpty()) return null
 
-            if (resp.type == "url-m3u8-encv1") {
+            if (resp.optString("type", "") == "url-m3u8-encv1") {
                 aesGcmDecryptToText(blob, K_RESPONSE, IV_RESPONSE)?.trim()?.takeIf { it.startsWith("http") }
             } else {
                 blob.takeIf { it.startsWith("http") }
@@ -409,6 +446,27 @@ open class Krx18Provider : MainAPI() {
         }
     }
 
+    /** One dooplayer REST call: plain verified headers first, then xhr + CloudflareKiller. */
+    private suspend fun dooPlayerGet(postid: String, nume: Int): String {
+        try {
+            val t = app.get(
+                "$mainUrl/wp-json/dooplayer/v2/$postid/movie/$nume",
+                headers = plainApiHeaders
+            ).text.trim()
+            if (t.isNotEmpty()) return t
+        } catch (e: Exception) {
+        }
+        return try {
+            app.get(
+                "$mainUrl/wp-json/dooplayer/v2/$postid/movie/$nume",
+                headers = xhrHeaders,
+                interceptor = cfKiller
+            ).text.trim()
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
     /** All embed/direct sources found for a post, from every known Dooplay endpoint */
     private suspend fun fetchEmbedUrls(pageUrl: String, postid: String?): List<Pair<String, String>> {
         val out = mutableListOf<Pair<String, String>>()
@@ -416,20 +474,11 @@ open class Krx18Provider : MainAPI() {
         // 1) dooplayer/v2 REST API - Dooplay 2.5.x route: /{postid}/{type}/{nume}
         if (!postid.isNullOrBlank()) {
             for (nume in 1..4) {
-                try {
-                    val txt = app.get(
-                        "$mainUrl/wp-json/dooplayer/v2/$postid/movie/$nume",
-                        headers = xhrHeaders,
-                        interceptor = cfKiller
-                    ).text.trim()
-                    if (txt.isEmpty() || !txt.startsWith("{")) break
-                    val resp = AppUtils.parseJson<PlayerResp>(txt) ?: continue
-                    val s = resp.embed_url ?: continue
-                    if (!s.startsWith("http")) break
-                    out.add(s to "Server $nume")
-                } catch (e: Exception) {
-                    break
-                }
+                val txt = dooPlayerGet(postid, nume)
+                if (txt.isEmpty() || !txt.startsWith("{")) break
+                val embed = parseEmbedUrl(txt)
+                if (embed == null) break
+                out.add(embed to "Server $nume")
             }
         }
 
@@ -449,10 +498,14 @@ open class Krx18Provider : MainAPI() {
                         interceptor = cfKiller
                     ).text
                     if (txt.isBlank() || txt.contains("error code:") || txt.contains("Just a moment")) continue
-                    val resp = AppUtils.parseJson<PlayerResp>(txt) ?: continue
-                    extractIframeSrc(resp.embed_url ?: resp.data ?: "").forEach { src ->
-                        out.add(src to "Server $nume")
-                    }
+                    val trimmed = txt.trim()
+                    if (!trimmed.startsWith("{")) continue
+                    val obj = JSONObject(trimmed)
+                    val raw = obj.optString("embed_url", "") + "\n" + obj.optString("data", "")
+                    val found = extractIframeSrc(raw)
+                    if (found.isEmpty()) break
+                    found.forEach { src -> out.add(src to "Server $nume") }
+                    break
                 } catch (e: Exception) {
                 }
             }
