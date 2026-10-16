@@ -333,6 +333,10 @@ open class Krx18Provider : MainAPI() {
         }
     }
 
+    /**
+     * Resolve a play.playkrx18.site (9stream) embed page to a final HLS url.
+     * Chain: embed page -> decrypt idfile/idUser -> AES-GCM payload -> getplay -> decrypt response.
+     */
     private suspend fun resolveNineStream(embedUrl: String): String? {
         return try {
             val embedHtml = fetchEmbedPage(embedUrl) ?: return null
@@ -398,6 +402,15 @@ open class Krx18Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (embed.isBlank() || embed.contains("youtube") || embed.contains("doubleclick")) return false
+
+        // 0) mov18plus.cloud / abyss.to "SoTrym" players: browser-locked by design.
+        //    Playback runs through a Service Worker with per-range signed /sora/ URLs
+        //    (hash = dbl-b64 of AES-CTR(md5(size)) over path+range) and the first
+        //    partSize bytes are AES-CTR encrypted client-side. The aggregating
+        //    /chunk/ route only exists inside the service worker (server 404s it).
+        //    CloudStream can only hand ExoPlayer a plain URL, so this host can
+        //    never play natively - skip it without wasting network round-trips.
+        if (embed.contains("mov18plus.cloud") || embed.contains("abyss.to")) return false
 
         // 1) 9stream self-hosted player (play.playkrx18.site) -> direct HLS
         if (embed.contains("playkrx18.site")) {

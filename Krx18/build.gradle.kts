@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 3
+version = 4
 
 android {
     namespace = "com.redowan"
@@ -9,7 +9,7 @@ cloudstream {
     description = """
         Krx18 (krx18.com) - erotic movies 18+ site. Ad-free where possible.
         All genres (countries + tags), paginated search, latest movies.
-        Server 1 (9stream HLS) fully decoded + supported.
+        Server 1 (9stream HLS) fully supported. Server 2 (abyss) is browser-locked and cannot play in CloudStream.
     """.trimIndent()
     authors = listOf("Redowan", "khadimsorder2-hue")
 
