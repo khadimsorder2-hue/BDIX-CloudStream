@@ -432,6 +432,7 @@ open class MmsVibexProvider : MainAPI() {
         val slug: String? = null,
         val link: String? = null,
         val title: WpTitle? = null,
+        @com.fasterxml.jackson.annotation.JsonProperty("_embedded")
         val embedded: WpEmbedded? = null
     )
 
@@ -445,5 +446,8 @@ open class MmsVibexProvider : MainAPI() {
     )
 
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
-    private data class WpMedia(val sourceUrl: String? = null)
+    private data class WpMedia(
+        @com.fasterxml.jackson.annotation.JsonProperty("source_url")
+        val sourceUrl: String? = null
+    )
 }
