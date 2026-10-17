@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -50,6 +51,10 @@ class MlsbdProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
 
     private val savelinksUrl = "https://savelinks.me"
+
+    /** Both mlsbd.co and the link hosts sit behind Cloudflare — the killer
+     *  solves challenges transparently (same pattern as the working Krx18). */
+    private val cfKiller = CloudflareKiller()
 
     private val docHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -122,7 +127,7 @@ class MlsbdProvider : MainAPI() {
     ): HomePageResponse {
         val base = request.data.trimEnd('/')
         val url = if (page <= 1) "$base/" else "$base/page/$page/"
-        val doc = app.get(url, headers = docHeaders, timeout = 60, allowRedirects = true).document
+        val doc = app.get(url, headers = docHeaders, timeout = 60, allowRedirects = true, interceptor = cfKiller).document
         val items = parseCards(doc).distinctBy { it.url }
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -132,7 +137,7 @@ class MlsbdProvider : MainAPI() {
         if (q.isEmpty()) return emptyList()
         val doc = try {
             app.get("$mainUrl/?s=" + URLEncoder.encode(q, "UTF-8"),
-                headers = docHeaders, timeout = 60, allowRedirects = true).document
+                headers = docHeaders, timeout = 60, allowRedirects = true, interceptor = cfKiller).document
         } catch (e: Exception) {
             return emptyList()
         }
@@ -140,7 +145,7 @@ class MlsbdProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = docHeaders, timeout = 60, allowRedirects = true).document
+        val doc = app.get(url, headers = docHeaders, timeout = 60, allowRedirects = true, interceptor = cfKiller).document
 
         val title = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
@@ -244,7 +249,7 @@ class MlsbdProvider : MainAPI() {
         val viewUrl = "$savelinksUrl/view/$code"
         val doc = try {
             app.get(viewUrl, headers = docHeaders + mapOf("Referer" to "$mainUrl/"),
-                timeout = 45, allowRedirects = true).document
+                timeout = 45, allowRedirects = true, interceptor = cfKiller).document
         } catch (e: Exception) {
             return emptyList()
         }
@@ -275,7 +280,7 @@ class MlsbdProvider : MainAPI() {
 
     private suspend fun resolveGdflix(url: String): List<ResolvedHost> {
         val res = try {
-            app.get(url, headers = docHeaders, timeout = 45, allowRedirects = true)
+            app.get(url, headers = docHeaders, timeout = 45, allowRedirects = true, interceptor = cfKiller)
         } catch (e: Exception) {
             return emptyList()
         }
@@ -308,7 +313,7 @@ class MlsbdProvider : MainAPI() {
 
     private suspend fun resolveMulticloud(url: String): List<ResolvedHost> {
         val res = try {
-            app.get(url, headers = docHeaders, timeout = 45, allowRedirects = true)
+            app.get(url, headers = docHeaders, timeout = 45, allowRedirects = true, interceptor = cfKiller)
         } catch (e: Exception) {
             return emptyList()
         }
@@ -324,7 +329,7 @@ class MlsbdProvider : MainAPI() {
             try {
                 val pres = app.get(player.replace("/player.php/", "/player.php"),
                     headers = docHeaders + mapOf("Referer" to url),
-                    timeout = 45, allowRedirects = true)
+                    timeout = 45, allowRedirects = true, interceptor = cfKiller)
                 val m = Regex("(?:const|let|var)\\s+streamSrc\\s*=\\s*[\"']([^\"']+)[\"']")
                     .find(pres.text)
                 val src = m?.groupValues?.get(1)

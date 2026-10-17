@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -55,6 +56,10 @@ class MovieLinkBDProvider : MainAPI() {
 
     /** Worker that turns file tokens into signed direct CDN links. */
     private val signApi = "https://dl.vircloud.site/api/sign/"
+
+    /** movieslinkbd.com family sits behind Cloudflare — kill challenges
+     *  transparently (same pattern as the working Krx18). */
+    private val cfKiller = CloudflareKiller()
 
     private val docHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -129,7 +134,7 @@ class MovieLinkBDProvider : MainAPI() {
         val url = "$mainUrl/wp-json/wp/v2/posts?categories=$categoryId" +
                 "&per_page=20&page=$page&_embed=wp:featuredmedia"
         val text = try {
-            app.get(url, headers = docHeaders, timeout = 30).text
+            app.get(url, headers = docHeaders, timeout = 30, interceptor = cfKiller).text
         } catch (e: Exception) {
             return emptyList()
         }
@@ -179,7 +184,7 @@ class MovieLinkBDProvider : MainAPI() {
             val text = app.get(apiUrl, headers = docHeaders + mapOf(
                 "Accept" to "application/json",
                 "Referer" to "$mainUrl/",
-            ), timeout = 30).text
+            ), timeout = 30, interceptor = cfKiller).text
             val items = tryParseJson<List<MlmbdItem>>(text).orEmpty()
             for (item in items) {
                 val title = decodeHtml(item.title) ?: continue
@@ -195,7 +200,7 @@ class MovieLinkBDProvider : MainAPI() {
         try {
             val apiUrl = "$mainUrl/wp-json/wp/v2/posts?search=" + URLEncoder.encode(q, "UTF-8") +
                     "&per_page=20&_embed=wp:featuredmedia"
-            val text = app.get(apiUrl, headers = docHeaders, timeout = 30).text
+            val text = app.get(apiUrl, headers = docHeaders, timeout = 30, interceptor = cfKiller).text
             val posts = tryParseJson<List<WpPost>>(text).orEmpty()
             for (post in posts) {
                 val link = post.link ?: continue
@@ -306,7 +311,7 @@ class MovieLinkBDProvider : MainAPI() {
         val candidates = listOf(url) + postUrls.map { "$it/$path" }
         for (candidate in candidates.distinct()) {
             val res = try {
-                app.get(candidate, headers = docHeaders, timeout = 60, allowRedirects = true)
+                app.get(candidate, headers = docHeaders, timeout = 60, allowRedirects = true, interceptor = cfKiller)
             } catch (e: Exception) {
                 continue
             }
@@ -382,7 +387,7 @@ class MovieLinkBDProvider : MainAPI() {
             try {
                 val text = app.get(signApi + entry.b64, headers = docHeaders + mapOf(
                     "Accept" to "application/json",
-                ), timeout = 30).text
+                ), timeout = 30, interceptor = cfKiller).text
                 val signed = tryParseJson<SignResponse>(text)?.downloadUrl
                     ?.takeIf { it.startsWith("http") } ?: continue
                 val quality = qualityOf(entry.name.orEmpty())
