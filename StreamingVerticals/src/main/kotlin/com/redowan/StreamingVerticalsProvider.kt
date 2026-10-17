@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.ShowStatus
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
@@ -82,16 +81,14 @@ class StreamingVerticalsProvider : MainAPI() {
 
     private suspend fun getIndex(): List<SvIndexItem> {
         cachedIndex?.let { return it }
-        synchronized(this) {
-            cachedIndex?.let { return it }
-            return try {
-                val text = app.get("$mainUrl/search-index.json", timeout = 120).text
-                val items = tryParseJson<List<SvIndexItem>>(text).orEmpty()
-                if (items.isNotEmpty()) cachedIndex = items
-                items
-            } catch (e: Exception) {
-                emptyList()
-            }
+        // No lock: worst case two concurrent searches both download the index once.
+        return try {
+            val text = app.get("$mainUrl/search-index.json", timeout = 120).text
+            val items = tryParseJson<List<SvIndexItem>>(text).orEmpty()
+            if (items.isNotEmpty()) cachedIndex = items
+            items
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 
@@ -195,7 +192,6 @@ class StreamingVerticalsProvider : MainAPI() {
             this.posterUrl = poster
             this.plot = desc.ifBlank { null }
             this.tags = tags
-            this.showStatus = ShowStatus.Completed
         }
     }
 
