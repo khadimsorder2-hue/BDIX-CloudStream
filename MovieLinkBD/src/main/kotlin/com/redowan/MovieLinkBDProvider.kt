@@ -222,7 +222,7 @@ class MovieLinkBDProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val res = fetchFirst(url)
-        val doc = res.document
+        val doc = res.doc
         val html = res.text
 
         val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
@@ -295,23 +295,24 @@ class MovieLinkBDProvider : MainAPI() {
     }
 
     /** Post pages may sit on either domain — try them in order. */
-    private suspend fun fetchFirst(url: String): com.lagradost.cloudstream3.AppResponse {
-        val primary = try {
-            app.get(url, headers = docHeaders, timeout = 60, allowRedirects = true)
-        } catch (e: Exception) {
-            null
-        }
-        if (primary != null && primary.isSuccessful) return primary
-        for (base in postUrls) {
-            val path = url.substringAfter("://").substringAfter('/')
-            val alt = try {
-                app.get("$base/$path", headers = docHeaders, timeout = 60, allowRedirects = true)
+    private data class FetchedPage(
+        val text: String,
+        val url: String,
+        val doc: org.jsoup.nodes.Document,
+    )
+
+    private suspend fun fetchFirst(url: String): FetchedPage {
+        val path = url.substringAfter("://").substringAfter('/')
+        val candidates = listOf(url) + postUrls.map { "$it/$path" }
+        for (candidate in candidates.distinct()) {
+            val res = try {
+                app.get(candidate, headers = docHeaders, timeout = 60, allowRedirects = true)
             } catch (e: Exception) {
                 continue
             }
-            if (alt.isSuccessful) return alt
+            if (res.isSuccessful) return FetchedPage(res.text, res.url, res.document)
         }
-        return primary ?: throw IllegalArgumentException("post unreachable: $url")
+        throw IllegalArgumentException("post unreachable: $url")
     }
 
     private fun decodeFileName(b64: String): String = try {
