@@ -18,6 +18,8 @@ import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
@@ -362,7 +364,7 @@ class MovieLinkBDProvider : MainAPI() {
             val title = (img.attr("title").ifBlank { img.attr("alt") }).trim()
                 .ifBlank { card.text().trim() }
             if (title.isBlank()) return@mapNotNull null
-            val poster = img.attr("data-src").ifBlank { img.attr("src") }.ifBlank { null }
+            val poster: String? = img.attr("data-src").ifBlank { img.attr("src") }.ifBlank { null }
             val tvType = typeFromUrl(href)
             if (tvType == TvType.Movie) {
                 newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = poster }
@@ -463,7 +465,7 @@ class MovieLinkBDProvider : MainAPI() {
         val title = doc.selectFirst(".movie-info-view h1")?.text()?.trim()?.ifBlank { null }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?: doc.title().trim().ifBlank { url }
-        val poster = doc.selectFirst(".image-container-view img")?.attr("src")?.ifBlank { null }
+        val poster: String? = doc.selectFirst(".image-container-view img")?.attr("src")?.ifBlank { null }
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = doc.selectFirst(".story-text")?.text()?.trim()?.ifBlank { null }
 
@@ -541,7 +543,7 @@ class MovieLinkBDProvider : MainAPI() {
                 this.plot = plot
                 this.tags = tags
                 this.year = year
-                if (cast != null) this.actors = cast
+                if (cast != null) addActors(cast)
                 if (trailerUrl != null) addTrailer(trailerUrl)
             }
         } else {
@@ -551,7 +553,7 @@ class MovieLinkBDProvider : MainAPI() {
                 this.plot = plot
                 this.tags = tags
                 this.year = year
-                if (cast != null) this.actors = cast
+                if (cast != null) addActors(cast)
                 if (trailerUrl != null) addTrailer(trailerUrl)
             }
         }

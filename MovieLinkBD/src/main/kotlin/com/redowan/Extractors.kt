@@ -12,7 +12,7 @@ private fun qLabel(q: Int): String = if (q > 0) "${q}p " else ""
 
 private fun cleanUrl(u: String): String = u.replace("&amp;", "&").trim()
 
-private fun emitLink(
+private suspend fun emitLink(
     callback: (ExtractorLink) -> Unit,
     source: String,
     label: String,

@@ -21,7 +21,7 @@ internal fun mlsbdQualityNum(text: String): Int {
     }
 }
 
-internal fun emitLink(
+internal suspend fun emitLink(
     callback: (ExtractorLink) -> Unit,
     source: String,
     label: String,

@@ -272,7 +272,7 @@ class MlsbdProvider : MainAPI() {
             if (href.isBlank() || href.contains("/category/") || href.contains("/author/")) {
                 return@mapNotNull null
             }
-            val poster = card.selectFirst("picture img, img")?.let { img ->
+            val poster: String? = card.selectFirst("picture img, img")?.let { img ->
                 img.attr("data-src").ifBlank {
                     img.attr("src").ifBlank {
                         img.attr("srcset").substringBefore(" ").trim()
@@ -333,7 +333,7 @@ class MlsbdProvider : MainAPI() {
         val title = doc.selectFirst("h1.entry-title, h1, .name")?.text()?.trim()?.ifBlank { null }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?: url
-        val poster = doc.selectFirst("img.aligncenter, .entry-content img, picture img")?.attr("src")?.ifBlank { null }
+        val poster: String? = doc.selectFirst("img.aligncenter, .entry-content img, picture img")?.attr("src")?.ifBlank { null }
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
         val tags = doc.select("a[rel=tag]").map { it.text().trim() }
             .filter { it.isNotBlank() }.distinct().ifEmpty { null }
@@ -486,7 +486,7 @@ class MlsbdProvider : MainAPI() {
         }
     }
 
-    private fun resolvePixeldrain(
+    private suspend fun resolvePixeldrain(
         link: String,
         callback: (ExtractorLink) -> Unit
     ) {
@@ -497,7 +497,7 @@ class MlsbdProvider : MainAPI() {
         emitDirect(url, "Pixeldrain", callback, "https://pixeldrain.com/")
     }
 
-    private fun emitDirect(
+    private suspend fun emitDirect(
         url: String,
         label: String,
         callback: (ExtractorLink) -> Unit,
