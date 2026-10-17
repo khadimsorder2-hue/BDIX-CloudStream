@@ -14,7 +14,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.lagradost.cloudstream3.Actor
-import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -486,7 +485,7 @@ class MovieLinkBDProvider : MainAPI() {
         val cast = doc.select(".mlbd-cast__p").take(12).mapNotNull { el ->
             val name = el.selectFirst("small")?.text()?.trim()?.ifBlank { null } ?: return@mapNotNull null
             val img = el.selectFirst("img")?.attr("abs:src")?.ifBlank { null }
-            ActorData(Actor(name, img))
+            Actor(name, img)
         }.ifEmpty { null }
 
         val trailerId = doc.selectFirst("[data-mlbd-trailer]")?.attr("data-mlbd-trailer")

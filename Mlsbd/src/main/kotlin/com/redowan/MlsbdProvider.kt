@@ -272,13 +272,11 @@ class MlsbdProvider : MainAPI() {
             if (href.isBlank() || href.contains("/category/") || href.contains("/author/")) {
                 return@mapNotNull null
             }
-            val poster: String? = card.selectFirst("picture img, img")?.let { img ->
-                img.attr("data-src").ifBlank {
-                    img.attr("src").ifBlank {
-                        img.attr("srcset").substringBefore(" ").trim()
-                    }
-                }.ifBlank { null }
-            }
+            val posterEl = card.selectFirst("picture img, img")
+            val poster: String? = if (posterEl == null) null else posterEl.attr("data-src")
+                .ifBlank { posterEl.attr("src") }
+                .ifBlank { posterEl.attr("srcset").substringBefore(" ").trim() }
+                .ifBlank { null }
             if (isSeries(href, title)) {
                 newTvSeriesSearchResponse(title, href, TvType.TvSeries) { this.posterUrl = poster }
             } else {
