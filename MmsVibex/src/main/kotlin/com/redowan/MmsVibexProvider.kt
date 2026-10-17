@@ -309,7 +309,7 @@ open class MmsVibexProvider : MainAPI() {
      * screen's built-in "open in browser" button opens the raw full-size image for
      * true fullscreen viewing.
      */
-    private fun loadSinglePhoto(url: String): LoadResponse {
+    private suspend fun loadSinglePhoto(url: String): LoadResponse {
         return newMovieLoadResponse("Photo", url, TvType.NSFW, PHOTO_DATA) {
             this.posterUrl = url
             this.backgroundPosterUrl = url
