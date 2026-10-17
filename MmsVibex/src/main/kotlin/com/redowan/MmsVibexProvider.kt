@@ -511,11 +511,12 @@ open class MmsVibexProvider : MainAPI() {
         // then fetch the FULL album (all sibling videos, user requirement)
         var albumUrl: String? = null
         val albumLinks = doc.select(".mms-video-album-preview a[href*=\"/actor/\"], a.mms-video-album-more a[href*=\"/actor/\"]")
-        if (!albumLinks.isEmpty()) {
-            albumUrl = normUrl(albumLinks.first().attr("href"))
+        val firstAlbumLink = if (albumLinks.isEmpty()) null else albumLinks.first()
+        if (firstAlbumLink != null) {
+            albumUrl = normUrl(firstAlbumLink.attr("href"))
         }
-        if (albumUrl != null && albumUrl!!.contains("/actor/")) {
-            val full = fetchAlbumVideos(albumUrl!!, url)
+        if (albumUrl != null && albumUrl.contains("/actor/")) {
+            val full = fetchAlbumVideos(albumUrl, url)
             for (r in full) {
                 if (albumRecs.none { sameUrl(it.url, r.url) }) albumRecs.add(r)
             }
