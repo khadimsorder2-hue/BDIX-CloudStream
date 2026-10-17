@@ -12,7 +12,6 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newExtractorLink
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
@@ -20,6 +19,7 @@ import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import java.net.URLEncoder
 
@@ -299,9 +299,9 @@ class MlsbdProvider : MainAPI() {
             .map { it.value }.distinct().take(1)
             .forEach { links.add(ResolvedHost(it, "$quality BusyCDN".trim(), quality, ExtractorLinkType.VIDEO, url)) }
         if (links.isEmpty()) {
-            // 3) Nothing direct? Hand the player/generate page itself over.
+            // Nothing direct? Hand the file page over as a browsable fallback.
             val title = filename.substringBeforeLast('.').trim()
-            links.add(ResolvedHost(url, "GDFlix · $title".take(60), quality, ExtractorLinkType.FILE, url))
+            links.add(ResolvedHost(url, "GDFlix · $title".take(60), quality, ExtractorLinkType.VIDEO, url))
         }
         return links
     }
