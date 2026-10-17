@@ -1,12 +1,12 @@
 // use an integer for version numbers
-version = 2
+version = 3
 
 android {
     namespace = "com.redowan"
 }
 
 cloudstream {
-    description = "MovieLinkBD (movieslinkbd.com family) — Bangla, Hindi, English, Dual Audio movies & web series with direct 480p-2160p MKV/MP4 CDN links. Auto-signed vircloud streams."
+    description = "MovieLinkBD (movielinkbd.li) — Recently Updated, Bangla, Bangla Dubbed & Hindi movies/series. Auto-resolves the live domain, one-tap Cloudflare verify, inline player streams + HubCloud/GDFlix/Pixeldrain direct links."
     authors = listOf("Redowan")
 
     /**
@@ -22,7 +22,8 @@ cloudstream {
     tvTypes = listOf(
         "Movie",
         "TvSeries",
-        "Others",
+        "AsianDrama",
+        "AnimeMovie",
     )
     language = "bn"
 
