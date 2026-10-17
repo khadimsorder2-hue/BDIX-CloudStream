@@ -15,6 +15,7 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -233,12 +234,13 @@ class SouthFreakProvider : MainAPI() {
         return newHomePageResponse(request.name, items, hasNext)
     }
 
-    override suspend fun search(query: String, page: Int): List<SearchResponse> {
+    override suspend fun search(query: String, page: Int): SearchResponseList {
         val q = query.trim()
-        if (q.isEmpty()) return emptyList()
+        if (q.isEmpty()) return newSearchResponseList(emptyList(), false)
         val url = "$mainUrl/wp-json/wp/v2/posts?search=" + URLEncoder.encode(q, "UTF-8") +
                 "&per_page=20&page=$page"
-        return wpPosts(url).distinctBy { it.url }
+        val results = wpPosts(url).distinctBy { it.url }
+        return newSearchResponseList(results, results.size >= 20)
     }
 
     // ---------------- load: post page ----------------
@@ -366,7 +368,7 @@ class SouthFreakProvider : MainAPI() {
                 continue
             }
             for (host in hosts) {
-                emitLink(host.url, host.label, host.quality, host.referer, callback)
+                emitLink(host.url, host.label, host.quality ?: 0, host.referer, callback)
                 found = true
             }
         }
