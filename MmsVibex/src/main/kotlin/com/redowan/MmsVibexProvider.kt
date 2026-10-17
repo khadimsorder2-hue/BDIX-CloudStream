@@ -1,10 +1,8 @@
 package com.redowan
 
-import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MainPageData
@@ -33,12 +31,15 @@ import org.jsoup.nodes.Element
  *  - ALL categories (Bangladeshi, Indian, Desi, Pakistani, Sri Lankan, Nepali, Arab, Cam, Hidden Cam, Gay/Shemale, Pashto, Pathan, Faphouse, Others)
  *  - Albums (actor/playlists) as series with each video as an episode
  *  - Video info page shows the site's reference stills (clean main thumb + clean frames)
- *    as an image grid right under the info
+ *    as big tap-able cards right under the info; each card opens a photo page with the
+ *    full-size image as the big poster, and the result screen's built-in
+ *    "open in browser" button shows it TRUE FULLSCREEN (CloudStream has no native
+ *    in-app image viewer, this is the only fullscreen path)
  *  - Videos that belong to an album show the album's other videos under the info
  *    (recommendations row: in-page album preview + full album fetch with pagination)
  *  - Dedicated photo albums: "Photo Albums" home row, per-video photo album cards on
- *    the info page, /video-photos/<video> listings, and full photo galleries rendered
- *    as an image grid on their info page (full-size CDN images)
+ *    the info page, /video-photos/<video> listings, and full photo galleries where
+ *    every photo is a big card -> photo page -> fullscreen via browser button
  *  - Paginated search via the WordPress REST API (clean JSON, no ads)
  *  - Ad-free playback: direct mp4 extracted from the site player config (mvp-config),
  *    VAST/magsrv ad calls are never touched
@@ -283,6 +284,7 @@ open class MmsVibexProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val clean = url.substringBefore("?")
         return when {
+            isImageUrl(clean) -> loadSinglePhoto(clean)
             clean.contains("/video-photos/") -> loadPhotoListing(clean)
             clean.contains("/photos/") -> {
                 // "/photos/" and "/photos/page/N/" are listings, "/photos/<slug>/" is a gallery
@@ -292,6 +294,28 @@ open class MmsVibexProvider : MainAPI() {
             }
             clean.contains("/actor/") -> loadAlbum(clean)
             else -> loadVideo(clean)
+        }
+    }
+
+    // ---------- SINGLE PHOTO (fullscreen-friendly detail page) ----------
+    private fun isImageUrl(u: String): Boolean =
+        Regex("\\.(jpe?g|png|webp)$", RegexOption.IGNORE_CASE)
+            .containsMatchIn(u.trimEnd('/').substringBefore("?"))
+
+    /**
+     * CloudStream has no native in-app image viewer (actors render as small circles,
+     * plot images don't render, posters are not click-able), so every photo gets its
+     * own detail page: the image is the BIG poster + page background, and the result
+     * screen's built-in "open in browser" button opens the raw full-size image for
+     * true fullscreen viewing.
+     */
+    private fun loadSinglePhoto(url: String): LoadResponse {
+        return newMovieLoadResponse("Photo", url, TvType.NSFW, PHOTO_DATA) {
+            this.posterUrl = url
+            this.backgroundPosterUrl = url
+            this.plot =
+                "Full-size photo. Tap the open-in-browser icon at the top of this page to view it in true fullscreen."
+            this.tags = listOf("Photo")
         }
     }
 
@@ -336,15 +360,20 @@ open class MmsVibexProvider : MainAPI() {
         }
         val relatedClean = related.distinctBy { it.url }.filterNot { sameUrl(it.url, url) }
 
+        // every photo as a big tap-able card (photo page -> fullscreen via browser)
+        val photoCards = capped.mapIndexed { i, p ->
+            newMovieSearchResponse("Photo ${i + 1}", p, TvType.NSFW) {
+                this.posterUrl = p
+            }
+        }
+
         return newMovieLoadResponse(title, url, TvType.NSFW, PHOTO_DATA) {
             this.posterUrl = poster
             this.backgroundPosterUrl = capped.firstOrNull()
-            this.plot = "Photo album - ${capped.size} photos."
+            this.plot = "Photo album - ${capped.size} photos. Tap a photo, then use the open-in-browser icon on its page for fullscreen."
             this.tags = listOf("Photo Album", "${capped.size} photos")
-            if (capped.isNotEmpty()) {
-                addActors(capped.mapIndexed { i, p -> Actor("Photo ${i + 1}", p) })
-            }
-            if (relatedClean.isNotEmpty()) this.recommendations = relatedClean
+            val recs = photoCards + relatedClean
+            if (recs.isNotEmpty()) this.recommendations = recs
         }
     }
 
@@ -458,6 +487,13 @@ open class MmsVibexProvider : MainAPI() {
         val refImages = refs.take(8)
         val background = refImages.firstOrNull()
 
+        // reference stills as big tap-able cards (photo page -> fullscreen via browser)
+        val stillCards = refImages.mapIndexed { i, u ->
+            newMovieSearchResponse("Reference ${i + 1}", u, TvType.NSFW) {
+                this.posterUrl = u
+            }
+        }
+
         // --- dedicated photo albums for this video (recommendation cards -> gallery view) ---
         val photoRecs = mutableListOf<SearchResponse>()
         for (a in doc.select("a.mms-photo-link-card")) {
@@ -531,7 +567,7 @@ open class MmsVibexProvider : MainAPI() {
             }
         }
 
-        val recommendations = (photoRecs + albumRecs)
+        val recommendations = (stillCards + photoRecs + albumRecs)
             .distinctBy { it.url }
             .take(MAX_RECS)
 
@@ -545,9 +581,6 @@ open class MmsVibexProvider : MainAPI() {
             this.plot = plot
             this.tags = tags.ifEmpty { listOf("MmsVibeX") }
             this.duration = duration
-            if (refImages.isNotEmpty()) {
-                addActors(refImages.mapIndexed { i, u -> Actor("Reference ${i + 1}", u) })
-            }
             if (recommendations.isNotEmpty()) this.recommendations = recommendations
         }
     }
