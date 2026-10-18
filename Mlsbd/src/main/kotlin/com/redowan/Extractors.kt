@@ -78,46 +78,17 @@ object GDFlix : ExtractorApi() {
                 }
 
             // 2) fastcdn proxy of the same object.
-            Regex("https://fastcdn-dl\\.pages\\.dev/\\?url=[^\"'<>\\s]+").findAll(html)
+            Regex("https://fastcdn-dl\\.pages\\.dev/\\?url=[^\"'<>\\s]+", RegexOption.IGNORE_CASE).findAll(html)
                 .map { cleanUrl(it.value) }.distinct().take(1)
                 .forEach {
                     emitLink(callback, "FastCDN", "${qLabel(q)}GDFlix FastCDN", it, q, pageUrl)
                     emitted++
                 }
 
-            // 3) instant CDN mirror.
-            Regex("https://instant\\.busycdn\\.xyz/[A-Za-z0-9]+").findAll(html)
-                .map { it.value }.distinct().take(1)
-                .forEach {
-                    emitLink(callback, "BusyCDN", "${qLabel(q)}GDFlix BusyCDN", it, q, pageUrl)
-                    emitted++
-                }
-
-            // 4) indexserver mirror (base64-wrapped stream).
-            Regex("https://[a-z0-9.-]*indexserver\\.site/[^\"'<>\\s]+").findAll(html)
-                .map { cleanUrl(it.value) }.distinct().take(1)
-                .forEach {
-                    emitLink(callback, "IndexServer", "${qLabel(q)}GDFlix IndexServer", it, q, pageUrl)
-                    emitted++
-                }
-
-            // 5) drivebot mirror.
-            Regex("https://drivebot\\.sbs/download\\?id=[^\"'<>\\s]+").findAll(html)
-                .map { cleanUrl(it.value) }.distinct().take(1)
-                .forEach {
-                    emitLink(callback, "DriveBot", "${qLabel(q)}GDFlix DriveBot", it, q, pageUrl)
-                    emitted++
-                }
-
-            // 6) goflix mirror page.
-            if (emitted == 0) {
-                Regex("https://goflix\\.sbs/en/mirror/[A-Za-z0-9]+").findAll(html)
-                    .map { it.value }.distinct().take(1)
-                    .forEach {
-                        emitLink(callback, "Goflix", "${qLabel(q)}GDFlix Goflix", it, q, pageUrl)
-                        emitted++
-                    }
-            }
+            // NOTE (verified live 2026-10): busycdn "Instant DL" 302s to a
+            // fastdl HTML page, indexserver mirrors 404, drivebot.sbs DNS is
+            // dead and goflix mirror pages are HTML — emitting them only
+            // produced broken player links, so those regexes are gone.
         } catch (e: Exception) {
             // silent
         }
@@ -162,7 +133,12 @@ object GDxFiles : ExtractorApi() {
                         referer = pageUrl, timeout = 45, allowRedirects = false
                     )
                     val loc = r2.headers["location"]
-                    if (!loc.isNullOrBlank() && loc.startsWith("http")) {
+                    // The /download route now 302s back to the file page when
+                    // the signed-R2 flow is unavailable — only emit REAL file
+                    // locations (verified 2026-10), never the HTML page URL.
+                    val valid = !loc.isNullOrBlank() && loc.startsWith("http") &&
+                        listOf("r2.dev", "cloudflarestorage.com", "pixeldrain").any { it in loc }
+                    if (valid) {
                         emitLink(callback, "GDx R2", "${qLabel(q)}GDxFiles R2", loc, q, "$mainUrl/")
                         emitted++
                     }
@@ -228,30 +204,38 @@ object MultiCloudLinks : ExtractorApi() {
             val pageUrl = res.url
             val q = mlsbdQualityNum(html.take(15000))
 
+            // The view page links its ArtPlayer as player.php/?v=<code>
+            // (note the slash before the query — the old regex missed it).
             val playerLink = Regex(
-                "https?://[a-z0-9.-]*multicloudlinks\\.com/player\\.php\\?v=[A-Za-z0-9]+",
+                "https?://[a-z0-9.-]*multicloudlinks\\.com/player\\.php/?\\?v=[A-Za-z0-9]+",
                 RegexOption.IGNORE_CASE
             ).find(html)?.value
             if (playerLink != null) {
                 try {
                     val pres = app.get(playerLink, referer = pageUrl, timeout = 45)
-                    val src = Regex("(?:const|let|var)\\s+streamSrc\\s*=\\s*[\"']([^\"']+)[\"']")
-                        .find(pres.text)?.groupValues?.get(1)
-                        ?: Regex("[\"'](https?://[^\"']*multidownload\\.lol[^\"']*)[\"']")
-                            .find(pres.text)?.groupValues?.get(1)
+                    val phtml = pres.text.replace("&amp;", "&")
+                    // streamSrc is the site's own watch endpoint
+                    // (dr1.multidownload.lol/d/<id>?…&action=watch) — serves raw
+                    // video bytes (HTTP 206, verified) for edge-cached files.
+                    val src = Regex("streamSrc\\s*=\\s*\"([^\"]+)\"").find(phtml)?.groupValues?.get(1)
+                        ?: Regex("\"(https?://[^\"]*multidownload\\.lol[^\"]*)\"").find(phtml)?.groupValues?.get(1)
                     if (src != null) {
                         emitLink(
-                            callback, "MultiCloud Watch", "MultiCloud Watch" + qLabel(q),
+                            callback, "MultiCloud Stream", "MultiCloud Stream" + qLabel(q),
                             cleanUrl(src), q, playerLink
                         )
                     }
                 } catch (e: Exception) {}
             }
 
-            Regex("https://dr\\d*\\.multidownload\\.lol/d/[^\"'<>\\s]+").findAll(html)
+            // Fallback: the /d/ route on the view page. The bare link only
+            // returns a "Processing Secure Transfer" JS interstitial — the
+            // site's own button ultimately requests &action=download.
+            Regex("https://dr\\d*\\.multidownload\\.lol/d/[^\"'<>\\s]+", RegexOption.IGNORE_CASE).findAll(html)
                 .map { cleanUrl(it.value) }.distinct().take(1)
                 .forEach {
-                    emitLink(callback, "MultiCloud Direct", "MultiCloud Direct" + qLabel(q), it, q, pageUrl)
+                    val dl = if ("action=" in it) it else "$it&action=download"
+                    emitLink(callback, "MultiCloud Direct", "MultiCloud Direct" + qLabel(q), dl, q, pageUrl)
                 }
         } catch (e: Exception) {
             // silent

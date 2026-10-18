@@ -7,8 +7,14 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class MovieLinkBDPlugin : Plugin() {
     override fun load(context: Context) {
-        // Activity context — required for the Cloudflare WebView solve dialog.
-        MovieLinkBDProvider.appContext = context
         registerMainAPI(MovieLinkBDProvider())
+        registerExtractorAPI(GDFlix)
+        registerExtractorAPI(GDxFiles)
+        registerExtractorAPI(MultiCloudLinks)
+        registerExtractorAPI(FilePress)
+        registerExtractorAPI(HubCloud)
+        registerExtractorAPI(Gofile)
+        registerExtractorAPI(Filesdl)
+        registerExtractorAPI(DriveSeed)
     }
 }
