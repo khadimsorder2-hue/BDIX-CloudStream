@@ -21,6 +21,13 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -41,9 +48,15 @@ import org.json.JSONObject
  * Requirements discovered by live probing:
  *  - every API needs 3 cookies set by the myknow page load (csrfToken, browserid,
  *    TSID) plus jsToken + pcftoken embedded in the page HTML -> we do a session
- *    bootstrap fetch and refresh it once automatically if an API starts failing
- *  - the m3u8 segments (data.teraboxpage.com) need NO cookies -> ExoPlayer plays
- *    them directly
+ *    bootstrap fetch and refresh it automatically when an API starts failing
+ *  - the m3u8 playlist + segments need NO cookies at playback time -> ExoPlayer
+ *    plays directly (verified against the real web player, which requests
+ *    M3U8_FLV_264_480 with the exact same param set)
+ *  - MANY shared resources get deleted over time (~45%) -> every home/search
+ *    card is probed against shorturlinfo (parallel, cached) and dead ones are
+ *    hidden instead of erroring on click
+ *  - the streaming API can fail transiently (errno 130 / 31074) -> loadLinks
+ *    retries once with a fresh session + fresh share sign/timestamp
  *  - folders are walked up to 2 levels deep, max 60 videos per share
  */
 open class PompomProvider : MainAPI() {
@@ -69,16 +82,21 @@ open class PompomProvider : MainAPI() {
 
         private const val APP_ID = "250528"
 
-        /** loadLinks data marker */
+        /** loadLinks data marker: POMPOM|shareid|uk|sign|ts|fid|surl */
         private const val DATA_PREFIX = "POMPOM|"
 
-        /** streaming type -> quality candidates (first working wins, deduped) */
+        /** streaming type -> quality candidates.
+         * FLV_264_480 first: the web player's default for guest accounts and the
+         * only transcode most of these clips have (higher types errno 130). */
         private val M3U8_TYPES = listOf(
+            "M3U8_FLV_264_480",
             "M3U8_AUTO_720",
             "M3U8_FLV_264_720",
-            "M3U8_FLV_264_1080",
-            "M3U8_FLV_264_480"
+            "M3U8_FLV_264_1080"
         )
+
+        /** shorturlinfo errno for a deleted share -> safe to cache as dead */
+        private const val ERRNO_DELETED = -7
 
         private val VIDEO_EXT = listOf(
             ".mp4", ".mkv", ".ts", ".flv", ".mov", ".avi", ".webm", ".m4v"
@@ -88,12 +106,16 @@ open class PompomProvider : MainAPI() {
         private const val MAX_DEPTH = 2
         private const val MAX_FILES = 60
         private const val PAGE_SIZE = 20
+
+        /** share-info / liveness cache TTL (sign+timestamp stay valid for hours) */
+        private const val INFO_TTL_MS = 10 * 60 * 1000L
     }
 
     // ---------------- session bootstrap ----------------
     @Volatile private var jsToken: String? = null
     @Volatile private var pcftoken: String? = null
     @Volatile private var cookieHeader: String? = null
+    private val sessionMutex = Mutex()
 
     private fun baseHeaders(): Map<String, String> = mapOf(
         "User-Agent" to UA,
@@ -102,32 +124,41 @@ open class PompomProvider : MainAPI() {
     )
 
     private suspend fun ensureSession(force: Boolean = false) {
-        if (!force && !jsToken.isNullOrBlank() && !cookieHeader.isNullOrBlank()) return
-        val res = app.get("$mainUrl/myknow/$WM_ROUTE", headers = mapOf("User-Agent" to UA))
-        val html = res.text
+        sessionMutex.withLock {
+            if (!force && !jsToken.isNullOrBlank() && !cookieHeader.isNullOrBlank()) return
+            val res = app.get(
+                "$mainUrl/myknow/$WM_ROUTE",
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language" to "en-US,en;q=0.9"
+                )
+            )
+            val html = res.text
 
-        // jsToken lives URL-encoded inside templateData:
-        //   "jsToken":"function%20fn%28a%29%7B...%7D%3Bfn%28%22HEX%22%29"
-        // the browser evals it -> window.jsToken = HEX
-        val decoded = try {
-            java.net.URLDecoder.decode(html, "UTF-8")
-        } catch (e: Exception) {
-            html
-        }
-        jsToken = Regex("fn\\(\"([0-9A-Fa-f]{40,})\"\\)").find(decoded)?.groupValues?.get(1)
-            ?: Regex("fn%28%22([0-9A-Fa-f]{40,})%22%29").find(html)?.groupValues?.get(1)
-        pcftoken = Regex("\"pcftoken\":\"([0-9a-f]+)\"").find(html)?.groupValues?.get(1)
+            // jsToken lives URL-encoded inside templateData:
+            //   "jsToken":"function%20fn%28a%29%7B...%7D%3Bfn%28%22HEX%22%29"
+            // the browser evals it -> window.jsToken = HEX
+            val decoded = try {
+                java.net.URLDecoder.decode(html, "UTF-8")
+            } catch (e: Exception) {
+                html
+            }
+            jsToken = Regex("fn\\(\"([0-9A-Fa-f]{40,})\"\\)").find(decoded)?.groupValues?.get(1)
+                ?: Regex("fn%28%22([0-9A-Fa-f]{40,})%22%29").find(html)?.groupValues?.get(1)
+            pcftoken = Regex("\"pcftoken\":\"([0-9a-f]+)\"").find(html)?.groupValues?.get(1)
 
-        // capture the 3 session cookies (csrfToken, browserid, TSID)
-        val setCookies = try {
-            res.headers.values("set-cookie")
-        } catch (e: Exception) {
-            listOfNotNull(res.headers["set-cookie"])
+            // capture the 3 session cookies (csrfToken, browserid, TSID)
+            val setCookies = try {
+                res.headers.values("set-cookie")
+            } catch (e: Exception) {
+                listOfNotNull(res.headers["set-cookie"])
+            }
+            cookieHeader = setCookies.mapNotNull { sc ->
+                val kv = sc.substringBefore(";").trim()
+                if (kv.contains("=") && kv.isNotBlank()) kv else null
+            }.joinToString("; ").takeIf { it.isNotBlank() }
         }
-        cookieHeader = setCookies.mapNotNull { sc ->
-            val kv = sc.substringBefore(";").trim()
-            if (kv.contains("=") && kv.isNotBlank()) kv else null
-        }.joinToString("; ").takeIf { it.isNotBlank() }
     }
 
     private suspend fun refreshSession() = ensureSession(force = true)
@@ -200,7 +231,7 @@ open class PompomProvider : MainAPI() {
         }
     }
 
-    /** type-safe double read (sell_price etc.) */
+    /** type-safe double read (sell_price, size etc. - longs would overflow Int) */
     private fun jDouble(o: JSONObject, key: String): Double {
         return try {
             when (val v = o.opt(key)) {
@@ -227,6 +258,79 @@ open class PompomProvider : MainAPI() {
 
     private fun cleanName(n: String): String = n.substringBeforeLast('.').trim().ifBlank { n }
 
+    // ---------------- share liveness (dead-link filter) ----------------
+    private data class CachedInfo(val json: JSONObject, val at: Long)
+
+    /** surl -> cached shorturlinfo (only successful responses) */
+    private val infoCache = HashMap<String, CachedInfo>()
+
+    /** surl -> liveness; false only for confirmed deleted shares */
+    private val liveCache = HashMap<String, Boolean>()
+
+    private fun cachedInfo(surl: String): JSONObject? = synchronized(infoCache) {
+        val c = infoCache[surl]
+        if (c != null && System.currentTimeMillis() - c.at < INFO_TTL_MS) c.json else null
+    }
+
+    private fun putInfo(surl: String, j: JSONObject) = synchronized(infoCache) {
+        if (infoCache.size > 120) infoCache.clear()
+        infoCache[surl] = CachedInfo(j, System.currentTimeMillis())
+    }
+
+    /** shorturlinfo with cache; null when the share is gone or the call failed */
+    private suspend fun shareInfo(surl: String, force: Boolean = false): JSONObject? {
+        if (!force) cachedInfo(surl)?.let { return it }
+        val j = api("/api/shorturlinfo", "shorturl=1$surl&root=1&scene=wm_home") ?: return null
+        if (jInt(j, "errno") == 0) {
+            putInfo(surl, j)
+            return j
+        }
+        return null
+    }
+
+    /**
+     * True when the share still exists. Only CONFIRMED deleted shares (errno -7,
+     * the exact code every dead share returns) are hidden and cached forever.
+     * Probe failures / ambiguous errnos keep the card visible (they can be
+     * transient rate limits) and are simply retried on the next page view.
+     */
+    private suspend fun isShareLive(surl: String): Boolean {
+        synchronized(liveCache) { liveCache[surl] }?.let { return it }
+        val j = api("/api/shorturlinfo", "shorturl=1$surl&root=1&scene=wm_home")
+            ?: return true // probe failed (network/rate limit) -> keep card, retried later
+        return when (jInt(j, "errno")) {
+            0 -> {
+                putInfo(surl, j)
+                synchronized(liveCache) { liveCache[surl] = true }
+                true
+            }
+            ERRNO_DELETED -> {
+                synchronized(liveCache) { liveCache[surl] = false }
+                false
+            }
+            else -> true // ambiguous -> keep, load() will error properly if truly gone
+        }
+    }
+
+    /** probe cards in parallel (8 at a time) and drop dead shares */
+    private suspend fun filterLive(cards: List<Pair<String, SearchResponse>>): List<SearchResponse> {
+        if (cards.isEmpty()) return emptyList()
+        return coroutineScope {
+            val sem = Semaphore(8)
+            cards.map { (surl, res) ->
+                async {
+                    sem.withPermit {
+                        try {
+                            if (isShareLive(surl)) res else null
+                        } catch (e: Exception) {
+                            res // network hiccup -> keep the card rather than hiding live content
+                        }
+                    }
+                }
+            }.awaitAll().filterNotNull()
+        }
+    }
+
     // ---------------- HOME ----------------
     override val mainPage = mainPageOf(
         "/wm/0" to "All",
@@ -243,35 +347,35 @@ open class PompomProvider : MainAPI() {
             "/api/webmaster/home/reslist",
             "category_idx=$idx&page=$page&psize=$PAGE_SIZE&user_route=$WM_ROUTE"
         )
-        val items = mutableListOf<SearchResponse>()
-        val total: Int
+        val cards = mutableListOf<Pair<String, SearchResponse>>()
+        var total = 0
         if (json != null && jInt(json, "errno") == 0) {
             val data = json.optJSONObject("data")
+            total = data?.let { jInt(it, "total") } ?: 0
             val arr = data?.let { jArr(it, "resource_list") }
             if (arr != null) {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
-                    val r = resourceToResult(o) ?: continue
-                    items.add(r)
+                    resourceToCard(o)?.let { cards.add(it) }
                 }
             }
-            total = data?.let { jInt(it, "total") } ?: items.size
-        } else {
-            total = items.size
         }
-        val hasNext = page * PAGE_SIZE < total
+        val items = filterLive(cards)
+        val hasNext = items.isNotEmpty() && page * PAGE_SIZE < total
         return newHomePageResponse(request.name, items, hasNext)
     }
 
-    private fun resourceToResult(o: JSONObject): SearchResponse? {
+    /** surl -> card; paid resources keep a "| Paid" marker */
+    private fun resourceToCard(o: JSONObject): Pair<String, SearchResponse>? {
         val surl = jStr(o, "surl")
         if (surl.isBlank()) return null
         val rawName = jStr(o, "name").ifBlank { "Video" }
         val paid = jDouble(o, "sell_price") > 0.0
         val title = if (paid) "$rawName | Paid" else rawName
-        return newMovieSearchResponse(title, "$mainUrl/tblink/$surl", TvType.NSFW) {
+        val res = newMovieSearchResponse(title, "$mainUrl/tblink/$surl", TvType.NSFW) {
             this.posterUrl = thumbsOf(o)
         }
+        return surl to res
     }
 
     // ---------------- SEARCH (client-side over the resource list) ----------------
@@ -284,7 +388,7 @@ open class PompomProvider : MainAPI() {
             "/api/webmaster/home/reslist",
             "category_idx=0&page=$page&psize=50&user_route=$WM_ROUTE"
         )
-        val items = mutableListOf<SearchResponse>()
+        val cards = mutableListOf<Pair<String, SearchResponse>>()
         var total = 0
         if (json != null && jInt(json, "errno") == 0) {
             val data = json.optJSONObject("data")
@@ -295,12 +399,12 @@ open class PompomProvider : MainAPI() {
                     val o = arr.optJSONObject(i) ?: continue
                     val name = jStr(o, "name")
                     if (!name.contains(query, ignoreCase = true)) continue
-                    val r = resourceToResult(o) ?: continue
-                    items.add(r)
+                    resourceToCard(o)?.let { cards.add(it) }
                 }
             }
         }
-        val hasNext = page < 3 && page * 50 < total
+        val items = filterLive(cards)
+        val hasNext = items.isNotEmpty() && page < 3 && page * 50 < total
         return newSearchResponseList(items, hasNext)
     }
 
@@ -322,8 +426,9 @@ open class PompomProvider : MainAPI() {
     )
 
     private suspend fun loadShare(surl: String): LoadResponse {
-        val sui = api("/api/shorturlinfo", "shorturl=1$surl&root=1&scene=wm_home")
-        if (sui == null || jInt(sui, "errno") != 0) {
+        // cache-first: probing already fetched info for most cards
+        val sui = shareInfo(surl) ?: shareInfo(surl, force = true)
+        if (sui == null) {
             throw ErrorLoadingException("Share deleted or unavailable")
         }
         val shareid = jStr(sui, "shareid")
@@ -352,7 +457,7 @@ open class PompomProvider : MainAPI() {
         }
 
         fun dataFor(v: ShareVideo): String =
-            "$DATA_PREFIX$shareid|$uk|$sign|$ts|${v.fid}"
+            "$DATA_PREFIX$shareid|$uk|$sign|$ts|${v.fid}|$surl"
 
         if (videos.size == 1) {
             val v = videos.first()
@@ -395,7 +500,8 @@ open class PompomProvider : MainAPI() {
 
     /**
      * Walk the share file tree: root listing first, then folders up to MAX_DEPTH
-     * levels, collecting playable video files (cap MAX_FILES).
+     * levels, collecting playable video files (cap MAX_FILES). Files with
+     * play_forbid or zero size (deleted/empty placeholders) are skipped.
      */
     private suspend fun walkShare(
         surl: String,
@@ -428,6 +534,7 @@ open class PompomProvider : MainAPI() {
             val cat = jInt(o, "category")
             if (cat != 1 && !isVideoName(name)) continue
             if (jInt(o, "play_forbid") != 0) continue
+            if (jDouble(o, "size") <= 0.0) continue // empty/deleted placeholder
             out.add(ShareVideo(jStr(o, "fs_id"), name, thumbsOf(o)))
         }
     }
@@ -447,8 +554,45 @@ open class PompomProvider : MainAPI() {
         val sign = parts[2]
         val ts = parts[3]
         val fid = parts[4]
+        val surl = parts.getOrNull(5)?.takeIf { it.isNotBlank() }
         if (shareid.isBlank() || uk.isBlank() || sign.isBlank() || fid.isBlank()) return false
 
+        if (jsToken.isNullOrBlank() || cookieHeader.isNullOrBlank()) ensureSession()
+
+        var found = emitStreams(shareid, uk, sign, ts, fid, callback)
+        if (found) return true
+
+        // Full recovery pass: transient errno (130/31074) or expired sign/timestamp.
+        // Fresh session + fresh share metadata, then one more try.
+        refreshSession()
+        var s2 = shareid
+        var u2 = uk
+        var sg2 = sign
+        var t2 = ts
+        if (surl != null) {
+            val fresh = shareInfo(surl, force = true)
+            if (fresh != null) {
+                s2 = jStr(fresh, "shareid")
+                u2 = jStr(fresh, "uk_str").ifBlank { jStr(fresh, "uk") }
+                sg2 = jStr(fresh, "sign")
+                t2 = jStr(fresh, "timestamp")
+            }
+        }
+        if (s2.isNotBlank() && u2.isNotBlank() && sg2.isNotBlank()) {
+            found = emitStreams(s2, u2, sg2, t2, fid, callback)
+        }
+        return found
+    }
+
+    /** try every streaming type for one file, emitting deduped links */
+    private suspend fun emitStreams(
+        shareid: String,
+        uk: String,
+        sign: String,
+        ts: String,
+        fid: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         var found = false
         val seen = mutableSetOf<String>()
         for (type in M3U8_TYPES) {
