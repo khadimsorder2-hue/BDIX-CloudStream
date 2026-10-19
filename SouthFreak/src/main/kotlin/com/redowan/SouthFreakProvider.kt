@@ -73,6 +73,8 @@ class SouthFreakProvider : MainAPI() {
 
     // ---------------- main page: every video category on the site ----------------
     override val mainPage = mainPageOf(
+        // special: WP REST without a category filter == the site's newest posts
+        "latest" to "Latest",
         // languages / regions
         "820" to "Hindi Dubbed",
         "819" to "Dual Audio",
@@ -226,8 +228,12 @@ class SouthFreakProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val url = "$mainUrl/wp-json/wp/v2/posts?categories=${request.data}" +
+        val url = if (request.data == "latest") {
+            "$mainUrl/wp-json/wp/v2/posts?per_page=20&page=$page"
+        } else {
+            "$mainUrl/wp-json/wp/v2/posts?categories=${request.data}" +
                 "&per_page=20&page=$page"
+        }
         val items = wpPosts(url)
         // REST returns fewer rows than per_page only on the last page and a
         // 400 error page maps to an empty list above.

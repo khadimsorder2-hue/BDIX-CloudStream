@@ -52,7 +52,9 @@ import java.net.URLEncoder
  */
 class MovieLinkBDProvider : MainAPI() {
 
-    override var mainUrl = "https://movielinkbd.one"
+    // .is (WordPress) is the live platform today — .one sits behind a CF wall /
+    // parked shell, so it is only a last-resort fallback.
+    override var mainUrl = "https://movielinkbd.is"
     override var name = "MovieLinkBD"
     override var lang = "bn"
     override val hasMainPage = true
@@ -110,6 +112,18 @@ class MovieLinkBDProvider : MainAPI() {
         }
     }
 
+    /** Parked / shell page: says "coming soon"-ish and has no real cards. */
+    private fun isStubPage(doc: Document, html: String): Boolean {
+        if (doc.select("a.ml-item-card, a[href*='/getLink/'], a[href*='generate/?file=']").isNotEmpty()) {
+            return false
+        }
+        val t = html.lowercase()
+        return listOf(
+            "coming soon", "we will be back", "be right back",
+            "site is temporarily", "under maintenance"
+        ).any { t.contains(it) }
+    }
+
     private suspend fun detectMode(doc: Document): Mode {
         return when {
             doc.select("a[href*='/getLink/'], a[href*='/getWatch/']").isNotEmpty() -> Mode.CNC
@@ -124,11 +138,12 @@ class MovieLinkBDProvider : MainAPI() {
     /** Probe both platforms; cache the first one that answers without CF. */
     private suspend fun resolveBase(): Pair<String, Mode> {
         resolved?.let { return it }
-        for (cand in listOf(CNC_URL to Mode.CNC, WP_URL to Mode.WP)) {
+        for (cand in listOf(WP_URL to Mode.WP, CNC_URL to Mode.CNC)) {
             try {
                 val res = app.get(cand.first, headers = headers, timeout = 25)
                 if (res.isSuccessful && !isCloudflare(res.text, res.code)) {
                     val doc = res.document
+                    if (isStubPage(doc, res.text)) continue
                     // Platform B may serve an empty-ish home; only accept WP
                     // when its markers exist, otherwise fall back to the
                     // candidate's nominal mode.
