@@ -62,9 +62,12 @@ open class Krx18Provider : MainAPI() {
     override val hasDownloadSupport = true
     override val hasQuickSearch = false
     override var lang = "bn"
+    // PURE NSFW ONLY. CloudStream's filterProviderByPreferredMedia() hides providers whose
+    // supportedTypes contain no non-NSFW type from home rows, the providers grid and search
+    // unless the user opts in to the NSFW media type. A mixed set (NSFW+Movie)
+    // leaks the provider into normal movie sections.
     override val supportedTypes = setOf(
-        TvType.NSFW,
-        TvType.Movie
+        TvType.NSFW
     )
 
     companion object {

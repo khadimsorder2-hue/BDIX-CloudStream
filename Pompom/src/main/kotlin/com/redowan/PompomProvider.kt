@@ -67,10 +67,12 @@ open class PompomProvider : MainAPI() {
     override val hasQuickSearch = false
     override val instantLinkLoading = true
     override var lang = "bn"
+    // PURE NSFW ONLY. CloudStream's filterProviderByPreferredMedia() hides providers whose
+    // supportedTypes contain no non-NSFW type from home rows, the providers grid and search
+    // unless the user opts in to the NSFW media type. A mixed set (NSFW+Movie+TvSeries)
+    // leaks the provider into normal movie/TV sections.
     override val supportedTypes = setOf(
-        TvType.NSFW,
-        TvType.Movie,
-        TvType.TvSeries
+        TvType.NSFW
     )
 
     companion object {

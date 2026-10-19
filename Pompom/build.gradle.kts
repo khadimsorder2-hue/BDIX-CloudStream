@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 2
+version = 3
 
 android {
     namespace = "com.redowan"
@@ -11,6 +11,8 @@ cloudstream {
         All categories (All / Desi / New Desi) with pages, folder shares opened as series,
         direct m3u8 streaming without login. Dead/deleted shares are auto-filtered from
         lists, playback auto-recovers with a fresh session + fresh stream sign. No account needed.
+        Marked pure NSFW: hidden from normal movie/TV sections - enable NSFW in
+        Settings > Providers > Preferred media type to see and use this provider.
     """.trimIndent()
     authors = listOf("Redowan", "khadimsorder2-hue")
 
@@ -24,9 +26,7 @@ cloudstream {
     status = 1
 
     tvTypes = listOf(
-        "NSFW",
-        "Movie",
-        "TvSeries"
+        "NSFW"
     )
     language = "bn"
 

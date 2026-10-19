@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 4
+version = 5
 
 android {
     namespace = "com.redowan"
@@ -12,6 +12,8 @@ cloudstream {
         Every photo opens a detail page with the full-size image; use its open-in-browser
         icon to view the photo in true fullscreen.
         All categories, albums (playlists), search with pages and home sorting (latest / popular / most viewed / longest / random).
+        Marked pure NSFW: hidden from normal movie/TV sections - enable NSFW in
+        Settings > Providers > Preferred media type to see and use this provider.
     """.trimIndent()
     authors = listOf("Redowan", "khadimsorder2-hue")
 
@@ -25,9 +27,7 @@ cloudstream {
     status = 1
 
     tvTypes = listOf(
-        "NSFW",
-        "Movie",
-        "TvSeries"
+        "NSFW"
     )
     language = "bn"
 

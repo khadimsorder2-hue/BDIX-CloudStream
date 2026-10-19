@@ -53,10 +53,12 @@ open class MmsVibexProvider : MainAPI() {
     override val hasQuickSearch = false
     override val instantLinkLoading = true
     override var lang = "bn"
+    // PURE NSFW ONLY. CloudStream's filterProviderByPreferredMedia() hides providers whose
+    // supportedTypes contain no non-NSFW type from home rows, the providers grid and search
+    // unless the user opts in to the NSFW media type. A mixed set (NSFW+Movie+TvSeries)
+    // leaks the provider into normal movie/TV sections.
     override val supportedTypes = setOf(
-        TvType.NSFW,
-        TvType.Movie,
-        TvType.TvSeries
+        TvType.NSFW
     )
 
     companion object {
@@ -224,7 +226,7 @@ open class MmsVibexProvider : MainAPI() {
             ?: cleanImg(post.selectFirst("img")?.attr("src"))
             ?: cleanImg(post.attr("data-main-thumb"))
 
-        return newMovieSearchResponse(title, url, TvType.TvSeries) {
+        return newMovieSearchResponse(title, url, TvType.NSFW) {
             this.posterUrl = poster
         }
     }
@@ -442,7 +444,7 @@ open class MmsVibexProvider : MainAPI() {
             }
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(title, url, TvType.NSFW, episodes) {
             this.posterUrl = poster
             this.plot = plot
             this.tags = listOf("Album")
