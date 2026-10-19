@@ -1,0 +1,9 @@
+# COOP/COEP for wasm decoder threads (HEVC fallback) + caching
+/index.html
+  Cache-Control: no-cache
+
+/assets/*
+  Cache-Control: public, max-age=14400
+
+/*
+  X-Content-Type-Options: nosniff
