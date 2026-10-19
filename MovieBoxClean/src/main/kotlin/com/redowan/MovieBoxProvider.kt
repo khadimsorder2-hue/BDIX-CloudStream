@@ -670,6 +670,10 @@ class MovieBoxProvider(private val cleanMode: Boolean = false) : MainAPI() {
             newExtractorLink(name, SourceStats.decorate("MovieBox API", label), link, type) {
                 this.quality = if (resolution > 0) resolution else 720
                 this.referer = ""
+                // bcdn.hakunaymatata.com answers HTTP 428 to browser UAs (Mozilla/5.0*),
+                // which kills CloudStream playback with ExoPlayer 2004 "bad http status".
+                // Send the MovieBox app UA — CDN-verified 200/206.
+                this.headers = mapOf("User-Agent" to ua)
             }
         )
     }
