@@ -7,17 +7,16 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class MlsbdPlugin : Plugin() {
     override fun load(context: Context) {
-        // Activity context — required for the Cloudflare WebView solve dialog.
-        MlsbdProvider.appContext = context
-        MlsbdStorage.init(context)
+        SourceStats.init(context)
         registerMainAPI(MlsbdProvider())
         registerExtractorAPI(GDFlix)
         registerExtractorAPI(GDxFiles)
         registerExtractorAPI(MultiCloudLinks)
         registerExtractorAPI(FilePress)
         registerExtractorAPI(HubCloud)
+        registerExtractorAPI(Shikshakdaak)
         registerExtractorAPI(Gofile)
         registerExtractorAPI(Filesdl)
-        registerExtractorAPI(Shikshakdaak)
+        registerExtractorAPI(M4ulinks)
     }
 }

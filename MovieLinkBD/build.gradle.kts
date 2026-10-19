@@ -1,12 +1,12 @@
 // use an integer for version numbers
-version = 4
+version = 5
 
 android {
     namespace = "com.redowan"
 }
 
 cloudstream {
-    description = "MovieLinkBD (movielinkbd.is) — Latest, Bangla, Bangla Dubbed & Hindi movies/series. Direct vircloud-signed links per quality (720p/1080p/4K), WP-JSON search, MultiCloud/GDFlix/HubCloud extractors for legacy posts."
+    description = "MovieLinkBD — dual platform (movielinkbd.one mirrors + movielinkbd.is): getLink/getWatch + vircloud-signed quality links, CNCVerse-grade extractors, per-source speed + view counters."
     authors = listOf("Redowan")
 
     /**

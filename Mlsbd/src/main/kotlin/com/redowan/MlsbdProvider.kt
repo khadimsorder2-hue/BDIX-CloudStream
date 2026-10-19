@@ -1,18 +1,5 @@
 package com.redowan
 
-import android.app.AlertDialog
-import android.content.Context
-import android.graphics.Color
-import android.os.Handler
-import android.os.Looper
-import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
@@ -22,41 +9,39 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import org.json.JSONTokener
-import org.jsoup.Jsoup
+import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
-import kotlin.coroutines.resume
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 
 /**
  * MLSBD (mlsbd.co — "The Largest Movie Link Store of Bangladesh").
  *
- * Architecture mirrors the battle-tested CNCVerse MlsbdProvider:
- *  - Mobile Chrome UA + optional `cf_clearance` cookie on every request.
- *  - Cloudflare pages are detected, then solved inside a WebView dialog the
- *    user can interact with once; the clearance cookie is persisted and every
- *    later request reuses it together with the WebView's own User-Agent.
- *  - Catalog cards: div.single-post (title h2/.post-title, poster data-src/src).
- *  - Post pages: `div.post-section-title` sections ("Download Now Epi-55")
- *    each holding `a.Dbtn` buttons that point at savelinks.me/view/<code>.
- *  - savelinks view pages list the real file hosts (gdflix / gdxfiles /
- *    filepress / multicloudlinks / hubcloud / pixeldrain / gofile / filesdl),
- *    each resolved by a dedicated ExtractorApi in Extractors.kt.
+ * Extraction ported 1:1 from the CNCVerse MlsbdProvider (user-verified
+ * working), reduced to plain HTTP — no WebView / Cloudflare machinery,
+ * because mlsbd.co serves plain 200s to a desktop Chrome UA (verified
+ * live 2026-10, 32 cards on the homepage):
+ *
+ *  - Catalog cards: div.single-post (.post-title, .thumb > a, .thumb img).
+ *  - Post pages: .name title, img.aligncenter poster, rich plot blocks.
+ *  - Download sections: div.post-section-title.download; consecutive <p>
+ *    siblings hold a.sd / a.hd / a.hevc anchors pointing at
+ *    savelinks.me/view/<code> (one per quality: 480p/720p/1080p).
+ *  - loadLinks: fetch the savelinks view page, take <ul><li><a href=http>
+ *    and hand every file host (gdxfiles / gdflix / multicloudlinks /
+ *    filepress …) to the dedicated extractors in Extractors.kt.
+ *
+ * Extra (user request): every source label carries a speed class and a
+ * persistent local view counter via SourceStats — "GDx R2 720p [Fast | 4
+ * views]" — so the user can see which source is fast and which one they
+ * actually use most.
  */
 class MlsbdProvider : MainAPI() {
 
@@ -69,213 +54,53 @@ class MlsbdProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.AsianDrama, TvType.AnimeMovie)
 
     companion object {
-        @Volatile
-        var appContext: Context? = null
-
-        private const val MOBILE_UA =
-            "Mozilla/5.0 (Linux; Android 13; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-        private const val SAVELINKS_URL = "https://savelinks.me"
+        /** Desktop UA — plain requests pass, no challenge (verified 2026-10). */
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
     }
 
-    /** Serialises WebView challenge solving so parallel home rows don't spawn dialogs. */
-    private val cfMutex = Mutex()
-
-    @Volatile
-    private var webViewUa: String? = null
-
-    private val baseHeaders = mapOf(
-        "User-Agent" to MOBILE_UA,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    private val headers = mapOf(
+        "User-Agent" to DESKTOP_UA,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language" to "bn,en-US;q=0.9,en;q=0.8",
-        "Upgrade-Insecure-Requests" to "1",
     )
 
-    /** Latest on the homepage, then the four priority sections first. */
+    /** Latest on the homepage, then the priority sections (CNCVerse order). */
     override val mainPage = mainPageOf(
         "" to "Latest Movies",
-        "category/bangla-movies" to "Bengali Movies",
         "category/bangla-dubbed" to "Bangla Dubbed",
-        "category/bollywood-movies" to "Bollywood Movies",
         "category/dual-audio-movies" to "Multi Audio Movies",
-        "category/hollywood-movies" to "Hollywood Movies",
         "category/tv-series" to "TV Series",
+        "category/bollywood-movies" to "Bollywood Movies",
+        "category/bangla-movies" to "Bengali Movies",
+        "category/hollywood-movies" to "Hollywood Movies",
     )
 
     // ------------------------------------------------------------------ fetch
 
-    private fun isCloudflare(html: String, statusCode: Int): Boolean {
-        if (statusCode == 403 || statusCode == 503) return true
-        if (html.length < 6000) {
-            return listOf(
-                "cf-browser-verification",
-                "Checking if the site connection is secure",
-                "Just a moment",
-                "Attention Required! | Cloudflare",
-                "Enable JavaScript and cookies to continue",
-            ).any { html.contains(it, ignoreCase = true) }
-        }
-        return false
-    }
-
-    /** One plain attempt with an optional cf_clearance cookie.
-     *  After a WebView solve the WebView's own UA must be reused —
-     *  cf_clearance is bound to the User-Agent that earned it. */
-    private fun fetchHeaders(cf: String?): Map<String, String> {
-        var h = baseHeaders
-        val ua = webViewUa
-        if (!ua.isNullOrBlank()) h = h + ("User-Agent" to ua)
-        if (!cf.isNullOrBlank()) h = h + ("Cookie" to "cf_clearance=$cf")
-        return h
-    }
-
-    private suspend fun tryDoc(url: String, cf: String?): Document? {
+    private suspend fun fetchDoc(url: String): Document? {
         return try {
-            val res = app.get(url, headers = fetchHeaders(cf), timeout = 60)
-            if (res.isSuccessful && !isCloudflare(res.text, res.code)) res.document else null
+            val res = app.get(url, headers = headers, timeout = 60)
+            if (res.isSuccessful) res.document else null
         } catch (e: Exception) {
             null
         }
     }
 
-    private suspend fun fetchHtml(url: String): Document {
-        val (savedCf, _) = MlsbdStorage.getCfCookie()
-        tryDoc(url, savedCf)?.let { return it }
-
-        cfMutex.withLock {
-            // Another row may have solved the challenge while we waited.
-            val (cfNow, _) = MlsbdStorage.getCfCookie()
-            if (!cfNow.isNullOrBlank() && cfNow != savedCf) {
-                tryDoc(url, cfNow)?.let { return it }
-            }
-            val html = fetchViaWebView(url)
-            return when {
-                html != null && html.length > 500 -> Jsoup.parse(html, url)
-                else -> tryDoc(url, null) ?: Jsoup.parse("", url)
-            }
-        }
-    }
-
-    /**
-     * Loads [url] in a visible WebView dialog so a Cloudflare/Turnstile
-     * challenge can be solved once; polls the rendered DOM and returns the
-     * final HTML. The WebView's UA is captured — cf_clearance is UA-bound.
-     */
-    private suspend fun fetchViaWebView(url: String): String? {
-        val ctx = appContext ?: return null
-        return withContext(Dispatchers.Main) {
-            suspendCancellableCoroutine { cont ->
-                var resolved = false
-                var dialog: AlertDialog? = null
-                var webView: WebView? = null
-                val handler = Handler(Looper.getMainLooper())
-
-                fun finish(html: String?) {
-                    if (resolved) return
-                    resolved = true
-                    try { dialog?.dismiss() } catch (e: Exception) {}
-                    try { webView?.destroy() } catch (e: Exception) {}
-                    if (cont.isActive) cont.resume(html)
-                }
-
-                try {
-                    val cookieManager = CookieManager.getInstance()
-                    cookieManager.setAcceptCookie(true)
-
-                    val wv = WebView(ctx)
-                    webView = wv
-                    wv.settings.javaScriptEnabled = true
-                    wv.settings.domStorageEnabled = true
-                    webViewUa = wv.settings.userAgentString
-                    wv.layoutParams = FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-
-                    val container = FrameLayout(ctx)
-                    container.addView(wv)
-
-                    val wrapper = LinearLayout(ctx)
-                    wrapper.orientation = LinearLayout.VERTICAL
-                    val tip = TextView(ctx)
-                    tip.text = "MLSBD: if a security check appears, tap \"Verify you are human\" once."
-                    tip.setTextColor(Color.WHITE)
-                    tip.setBackgroundColor(Color.parseColor("#0d1117"))
-                    val pad = (10 * ctx.resources.displayMetrics.density).toInt()
-                    tip.setPadding(pad, pad, pad, pad)
-                    wrapper.addView(tip)
-                    wrapper.addView(container)
-
-                    val dlg = AlertDialog.Builder(ctx)
-                        .setView(wrapper)
-                        .setCancelable(true)
-                        .setOnDismissListener { finish(null) }
-                        .create()
-                    dialog = dlg
-                    dlg.show()
-                    dlg.window?.setLayout(
-                        (ctx.resources.displayMetrics.widthPixels * 0.95f).toInt(),
-                        (ctx.resources.displayMetrics.heightPixels * 0.8f).toInt()
-                    )
-
-                    fun poll() {
-                        if (resolved) return
-                        wv.evaluateJavascript("document.documentElement.outerHTML") { raw ->
-                            if (resolved) return@evaluateJavascript
-                            val html = unescapeJsString(raw ?: "")
-                            val title = wv.title ?: ""
-                            val stillCf = title.contains("Just a moment", true) ||
-                                title.contains("Cloudflare", true) ||
-                                html.contains("Just a moment", true)
-                            if (!stillCf && html.length > 3000) {
-                                val cookies = cookieManager.getCookie(url) ?: ""
-                                Regex("cf_clearance=([^;]+)").find(cookies)?.groupValues?.get(1)
-                                    ?.let { MlsbdStorage.saveCfCookie(it) }
-                                finish(html)
-                            } else {
-                                handler.postDelayed({ poll() }, 1000L)
-                            }
-                        }
-                    }
-
-                    wv.webViewClient = WebViewClient()
-                    wv.loadUrl(url)
-                    handler.postDelayed({ poll() }, 1500L)
-                    handler.postDelayed({ finish(null) }, 180_000L)
-                } catch (e: Exception) {
-                    finish(null)
-                }
-            }
-        }
-    }
-
-    /** evaluateJavascript wraps the DOM in a JSON string literal. */
-    private fun unescapeJsString(raw: String): String {
-        if (raw.startsWith("\"") && raw.endsWith("\"") && raw.length > 1) {
-            return try {
-                JSONTokener(raw).nextValue().toString()
-            } catch (e: Exception) {
-                raw.removeSurrounding("\"")
-            }
-        }
-        return raw
-    }
-
     // ------------------------------------------------------------------ cards
 
     private fun parseCards(doc: Document): List<SearchResponse> {
-        return doc.select("div.single-post, article, .post-item, .item").mapNotNull { card ->
-            val titleEl = card.selectFirst("h2, .post-title, .entry-title") ?: return@mapNotNull null
-            val title = titleEl.text().trim()
+        return doc.select("div.single-post").mapNotNull { post ->
+            val title = post.select(".post-title").text().replace(Regex("\\s+"), " ").trim()
+                .ifBlank { post.select("h2").text().trim() }
             if (title.isBlank()) return@mapNotNull null
-            val a = card.selectFirst("a[href]") ?: return@mapNotNull null
+            val a = post.selectFirst(".thumb > a") ?: return@mapNotNull null
             val href = a.attr("abs:href").ifBlank { a.attr("href") }
-            if (href.isBlank() || href.contains("/category/") || href.contains("/author/")) {
-                return@mapNotNull null
-            }
-            val posterEl = card.selectFirst("picture img, img")
-            val poster: String? = if (posterEl == null) null else posterEl.attr("data-src")
-                .ifBlank { posterEl.attr("src") }
-                .ifBlank { posterEl.attr("srcset").substringBefore(" ").trim() }
+            if (href.isBlank() || !href.startsWith("http")) return@mapNotNull null
+            val img = post.selectFirst(".thumb img")
+            val poster: String? = if (img == null) null else img.attr("src")
+                .ifBlank { img.attr("data-src") }
+                .ifBlank { img.attr("srcset").substringBefore(" ").trim() }
                 .ifBlank { null }
             if (isSeries(href, title)) {
                 newTvSeriesSearchResponse(title, href, TvType.TvSeries) { this.posterUrl = poster }
@@ -302,7 +127,8 @@ class MlsbdProvider : MainAPI() {
             page <= 1 -> if (path.isEmpty()) "$mainUrl/" else "$mainUrl/$path/"
             else -> if (path.isEmpty()) "$mainUrl/page/$page/" else "$mainUrl/$path/page/$page/"
         }
-        val doc = fetchHtml(url)
+        val doc = fetchDoc(url)
+            ?: return newHomePageResponse(request.name, emptyList(), hasNext = false)
         val items = parseCards(doc)
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -310,103 +136,131 @@ class MlsbdProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-        val doc = fetchHtml("$mainUrl/?s=" + URLEncoder.encode(q, "UTF-8"))
+        val doc = fetchDoc("$mainUrl/?s=" + URLEncoder.encode(q, "UTF-8"))
+            ?: return emptyList()
         return parseCards(doc)
     }
 
     // ------------------------------------------------------------------ load
 
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class SavelinkEntry(
-        val code: String? = null,
-        val label: String? = null,
-        val quality: Int = 0,
-    )
-
-    private fun SavelinkEntry.toJson(): String = mapper.writeValueAsString(this)
+    /** CNCVerse data format: "quality|url ; quality|url". */
+    private data class QLink(val quality: String, val url: String) {
+        fun pack(): String = "$quality|$url"
+    }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = fetchHtml(url)
+        val doc = fetchDoc(url) ?: throw IllegalArgumentException("post unreachable: $url")
 
-        val title = doc.selectFirst("h1.entry-title, h1, .name")?.text()?.trim()?.ifBlank { null }
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: url
-        val poster: String? = doc.selectFirst("img.aligncenter, .entry-content img, picture img")?.attr("src")?.ifBlank { null }
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-        val tags = doc.select("a[rel=tag]").map { it.text().trim() }
-            .filter { it.isNotBlank() }.distinct().ifEmpty { null }
-        val plot = doc.selectFirst(".post-content p, .entry-content p")?.text()?.trim()?.ifBlank { null }
-            ?: doc.selectFirst("meta[name=description]")?.attr("content")
+        val title = doc.select(".name").text().replace(Regex("\\s+"), " ").trim()
+            .ifBlank { doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim() ?: "" }
+            .ifBlank { doc.selectFirst("h1")?.text()?.trim() ?: "" }
+            .ifBlank { url }
         val year = Regex("(?<=\\()\\d{4}(?=\\))").find(title)?.value?.toIntOrNull()
-            ?: Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
+        val image = doc.select("img.aligncenter").attr("src")
+            .ifBlank { doc.selectFirst("meta[property=og:image]")?.attr("content") ?: "" }
 
-        // Walk the download sections in document order; each section is one
-        // episode (series) or one quality group (movies).
-        val sections = LinkedHashMap<String, MutableList<SavelinkEntry>>()
-        var current = "Download Now"
-        for (el in doc.select("div.post-section-title, a.Dbtn, a.sd, a.hd, a.hevc")) {
-            if (el.tagName() == "div") {
-                current = el.text().trim().ifBlank { "Download Now" }
-                sections.getOrPut(current) { mutableListOf() }
-                continue
+        doc.select("br").append("\\n")
+        val plot = listOf(
+            doc.select(".single-post-title").text(),
+            doc.select(".misc").text(),
+            doc.select(".details").text().replace("\\n ", "\n"),
+            doc.select(".storyline").text(),
+            doc.select(".production").text().replace("\\n ", "\n"),
+            doc.select(".media").text().replace("\\n ", "\n"),
+        ).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            .joinToString("\n")
+            .ifBlank { doc.selectFirst("meta[name=description]")?.attr("content")?.trim() ?: "" }
+        val tags = doc.select("a[rel=tag]").map { it.text().trim() }
+            .filter { it.isNotBlank() }.distinct().take(6).ifEmpty { null }
+
+        // Download sections in document order. 1 (or 0 with stray links) =
+        // movie; several per-episode sections = series.
+        val sections = LinkedHashMap<String, MutableList<QLink>>()
+        for (div in doc.select("div.post-section-title.download, div.post-section-title")) {
+            val secTitle = div.text().replace(Regex("\\s+"), " ").trim().ifBlank { "Download Now" }
+            val bucket = sections.getOrPut(secTitle) { mutableListOf() }
+            var sib = div.nextElementSibling()
+            while (sib != null && sib.tagName() == "p") {
+                for (a in sib.select("a")) {
+                    val cls = a.classNames()
+                    if (!cls.any { it == "sd" || it == "hd" || it == "hevc" }) continue
+                    val href = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
+                    if (href.isEmpty() || !href.startsWith("http")) continue
+                    val q = qualityLabel(a.text(), cls)
+                    if (bucket.none { it.url == href }) bucket.add(QLink(q, href))
+                }
+                sib = sib.nextElementSibling()
             }
-            val href = el.attr("abs:href").ifBlank { el.attr("href") }
-            if (href.isBlank()) continue
-            val code = Regex("savelinks\\.me/view/([A-Za-z0-9]+)").find(href)?.groupValues?.get(1)
-                ?: continue
-            val cls = el.className().lowercase()
-            val label = el.text().replace(Regex("\\s+"), " ").trim().ifBlank { "Download" }
-            val q = mlsbdQualityNum("$label $cls")
-            val bucket = sections.getOrPut(current) { mutableListOf() }
-            val idx = bucket.indexOfFirst { it.code == code }
-            if (idx >= 0) {
-                if (q > bucket[idx].quality) bucket[idx] = SavelinkEntry(code, label, q)
-            } else {
-                bucket.add(SavelinkEntry(code, label, q))
+        }
+
+        // Resilience: page-wide sd/hd/hevc anchors when no section wrapper exists.
+        if (sections.values.all { it.isEmpty() }) {
+            val bucket = sections.getOrPut("Download Now") { mutableListOf() }
+            for (a in doc.select("a.sd, a.hd, a.hevc")) {
+                val href = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
+                if (href.startsWith("http") && bucket.none { it.url == href }) {
+                    bucket.add(QLink(qualityLabel(a.text(), a.classNames()), href))
+                }
             }
         }
 
         val epRegex = Regex("Epi-?\\s*(\\d{1,3})(?:-(\\d{1,3}))?", RegexOption.IGNORE_CASE)
-        // Series signal: title/URL hints OR multiple per-episode sections
-        // ("Download Now Epi-55", "Download Now Epi-54", …) — the structural
-        // check catches titles like "S01E55" that evade word-boundary regexes.
         val epSectionCount = sections.keys.count { epRegex.containsMatchIn(it) }
-        val isSeries = isSeries(url, title) || epSectionCount >= 2
+        val isSeriesPost = isSeries(url, title) || epSectionCount >= 2
 
-        return if (isSeries) {
-            val episodes = mutableListOf<Episode>()
-            sections.forEach { (secTitle, links) ->
-                if (links.isEmpty()) return@forEach
-                val epNum = epRegex.find(secTitle)?.groupValues?.get(1)?.toIntOrNull()
-                val qualities = links.mapNotNull { it.quality.takeIf { q -> q > 0 } }
-                    .distinct().sortedDescending().joinToString("/") { "${it}p" }
-                val data = links.joinToString("|") { it.toJson() }
-                episodes.add(newEpisode(data) {
-                    name = when {
-                        epNum != null -> "Episode $epNum" + if (qualities.isNotBlank()) " · $qualities" else ""
-                        secTitle.equals("Download Now", true) -> "Full" + if (qualities.isNotBlank()) " · $qualities" else ""
-                        else -> secTitle
-                    }
-                    if (epNum != null) this.episode = epNum
-                    this.season = 1
-                })
+        return if (isSeriesPost) {
+            val episodes = mutableListOf<com.lagradost.cloudstream3.Episode>()
+            for ((secTitle, links) in sections) {
+                if (links.isEmpty()) continue
+                val m = epRegex.find(secTitle)
+                val start = m?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val end = m?.groupValues?.get(2)?.toIntOrNull() ?: start
+                val actualStart = if (start <= 0) 1 else start
+                val actualEnd = if (end <= 0) actualStart else end
+                val data = links.joinToString(" ; ") { it.pack() }
+                val qualities = links.mapNotNull {
+                    Regex("(\\d{3,4})p").find(it.quality)?.value
+                }.distinct().joinToString("/")
+                for (epNum in actualStart..actualEnd) {
+                    episodes.add(newEpisode(data) {
+                        name = "Episode $epNum" + if (qualities.isNotBlank()) " · $qualities" else ""
+                        this.season = 1
+                        this.episode = epNum
+                    })
+                }
             }
             episodes.sortBy { it.episode }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.plot = plot
+                this.posterUrl = image.ifBlank { null }
+                this.plot = plot.ifBlank { null }
                 this.tags = tags
                 this.year = year
             }
         } else {
-            val all = sections.values.flatten().distinctBy { it.code }
-            val data = all.joinToString("|") { it.toJson() }
+            val all = sections.values.flatten().distinctBy { it.url }
+            val data = all.joinToString(" ; ") { it.pack() }
             newMovieLoadResponse(title, url, TvType.Movie, data) {
-                this.posterUrl = poster
-                this.plot = plot
+                this.posterUrl = image.ifBlank { null }
+                this.plot = plot.ifBlank { null }
                 this.tags = tags
                 this.year = year
             }
+        }
+    }
+
+    /** "Download in 720p quality" / class sd|hd|hevc -> "720p" style label. */
+    private fun qualityLabel(text: String, classes: Collection<String>): String {
+        val t = text.lowercase()
+        return when {
+            "2160" in t || "4k" in t -> "4K"
+            "1080" in t -> "1080p"
+            "720" in t -> "720p"
+            "480" in t -> "480p"
+            "360" in t -> "360p"
+            classes.contains("hevc") -> "HEVC"
+            classes.contains("hd") -> "HD"
+            classes.contains("sd") -> "SD"
+            else -> "Unknown"
         }
     }
 
@@ -419,69 +273,95 @@ class MlsbdProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         if (data.isBlank()) return false
-        val entries = data.split("|")
-            .mapNotNull { tryParseJson<SavelinkEntry>(it) }
-            .filter { !it.code.isNullOrBlank() }
-        if (entries.isEmpty()) return false
-
+        val counted = mutableSetOf<String>()
         var found = false
-        for (entry in entries) {
-            val hosts = try {
-                resolveSavelinkHosts(entry.code!!)
-            } catch (e: Exception) {
-                emptyList()
-            }
-            for (host in hosts) {
-                try {
-                    resolveCustomExtractor(host, subtitleCallback, callback)
-                    found = true
-                } catch (e: Exception) {
-                    // try the next host
+
+        for (item in data.split(" ; ")) {
+            val parts = item.split("|", limit = 2)
+            val link = parts.getOrNull(1)?.trim() ?: item.trim()
+            if (link.isEmpty() || !link.startsWith("http")) continue
+            try {
+                if (link.contains("savelinks")) {
+                    // Savelinks view page: real file hosts sit in <ul><li><a href=http>.
+                    val res = app.get(link, headers = headers, referer = "$mainUrl/", timeout = 45)
+                    if (!res.isSuccessful) continue
+                    val pageUrl = res.url
+                    for (a in res.document.select("ul li a[href^=http], ul li a[href^=https]")) {
+                        val host = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
+                        if (!isHostLink(host)) continue
+                        if (dispatchHost(host, pageUrl, subtitleCallback, callback, counted)) found = true
+                    }
+                } else {
+                    if (dispatchHost(link, "$mainUrl/", subtitleCallback, callback, counted)) found = true
                 }
+            } catch (e: Exception) {
+                // try the next item
             }
         }
         return found
     }
 
-    /** Follows one savelinks.me/view/<code> page and returns the file-host URLs. */
-    private suspend fun resolveSavelinkHosts(code: String): List<String> {
-        val viewUrl = "$SAVELINKS_URL/view/$code"
-        val (cf, _) = MlsbdStorage.getCfCookie()
-        val headers = fetchHeaders(cf) + mapOf("Referer" to "$mainUrl/")
-        val res = app.get(viewUrl, headers = headers, timeout = 45)
-        if (!res.isSuccessful) return emptyList()
-        return res.document.select("a[href]")
-            .map { it.attr("abs:href").ifBlank { it.attr("href") } }
-            .filter { it.startsWith("http") }
-            .filter { link ->
-                val l = link.lowercase()
-                !l.contains("savelinks.me") && !l.contains("mlsbd.co") &&
-                    !l.contains("t.me") && !l.contains("telegram") &&
-                    !l.contains("whatsapp") && !l.contains("facebook") &&
-                    !l.contains("twitter") && !l.contains("javascript:")
-            }
-            .distinctBy { it.substringBefore("?") }
+    /** Social/site-chrome filter for savelinks pages. */
+    private fun isHostLink(link: String): Boolean {
+        val l = link.lowercase()
+        if (!l.startsWith("http")) return false
+        return listOf("savelinks.me", "mlsbd.co", "t.me", "telegram", "whatsapp",
+            "facebook", "twitter", "javascript:", "login").none { it in l }
     }
 
-    /** Host-based dispatch into the dedicated ExtractorApis. */
-    private suspend fun resolveCustomExtractor(
+    /**
+     * Host-based dispatch into the dedicated ExtractorApis, with a
+     * SourceStats wrapper that counts one view per host per loadLinks call
+     * and appends speed/views to every label.
+     */
+    private suspend fun dispatchHost(
         link: String,
+        referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
+        callback: (ExtractorLink) -> Unit,
+        counted: MutableSet<String>,
+    ): Boolean {
+        val hostKey = SourceStats.hostKeyOf(link)
+        var emitted = false
+        val wrapped: (ExtractorLink) -> Unit = { linkOut ->
+            emitted = true
+            if (counted.add(hostKey)) SourceStats.record(hostKey)
+            callback(linkOut)
+        }
         val l = link.lowercase()
         when {
-            "pixeldrain.com" in l -> resolvePixeldrain(link, callback)
-            "filepress" in l || "filebee" in l -> FilePress.getUrl(link, mainUrl, subtitleCallback, callback)
-            "multicloud" in l -> MultiCloudLinks.getUrl(link, mainUrl, subtitleCallback, callback)
-            "gdxfiles" in l -> GDxFiles.getUrl(link, mainUrl, subtitleCallback, callback)
-            "gdflix" in l -> GDFlix.getUrl(link, mainUrl, subtitleCallback, callback)
-            "hubcloud" in l || "hubdrive" in l -> HubCloud.getUrl(link, mainUrl, subtitleCallback, callback)
-            "shikshakdaak" in l -> Shikshakdaak.getUrl(link, mainUrl, subtitleCallback, callback)
-            "gofile" in l -> Gofile.getUrl(link, mainUrl, subtitleCallback, callback)
-            "filesdl" in l -> Filesdl.getUrl(link, mainUrl, subtitleCallback, callback)
-            else -> { /* unknown host — skip silently (ads etc.) */ }
+            "pixeldrain.com" in l -> resolvePixeldrain(link, wrapped)
+            "filepress" in l || "filebee" in l -> FilePress.getUrl(link, referer, subtitleCallback, wrapped)
+            "multicloud" in l || "multidownload" in l -> MultiCloudLinks.getUrl(link, referer, subtitleCallback, wrapped)
+            "gdxfiles" in l -> GDxFiles.getUrl(link, referer, subtitleCallback, wrapped)
+            "gdflix" in l -> GDFlix.getUrl(link, referer, subtitleCallback, wrapped)
+            "hubcloud" in l || "hubdrive" in l -> HubCloud.getUrl(link, referer, subtitleCallback, wrapped)
+            "shikshakdaak" in l -> Shikshakdaak.getUrl(link, referer, subtitleCallback, wrapped)
+            "gofile" in l -> Gofile.getUrl(link, referer, subtitleCallback, wrapped)
+            "filesdl" in l -> Filesdl.getUrl(link, referer, subtitleCallback, wrapped)
+            "m4ulinks" in l -> M4ulinks.getUrl(link, referer, subtitleCallback, wrapped)
+            "savelinks" in l -> {
+                // Nested savelinks page — resolve its host links recursively.
+                try {
+                    val res = app.get(link, headers = headers, referer = referer, timeout = 45)
+                    if (res.isSuccessful) {
+                        for (a in res.document.select("ul li a[href^=http], a[href^=http]")) {
+                            val nested = a.attr("abs:href").ifBlank { a.attr("href") }.trim()
+                            if (!isHostLink(nested) || nested.contains("savelinks")) continue
+                            if (dispatchHost(nested, res.url, subtitleCallback, callback, counted)) emitted = true
+                        }
+                    }
+                } catch (e: Exception) { /* skip */ }
+            }
+            else -> {
+                // Unknown host: let CloudStream's global registry try, but
+                // only accept it when a matching extractor actually exists.
+                try {
+                    loadExtractor(link, referer, subtitleCallback, wrapped)
+                } catch (e: Exception) { /* skip */ }
+            }
         }
+        return emitted
     }
 
     private suspend fun resolvePixeldrain(
@@ -490,21 +370,16 @@ class MlsbdProvider : MainAPI() {
     ) {
         val id = link.substringAfter("pixeldrain.com/").trimStart('/')
             .substringBefore("?").substringBefore("/").trim()
-        if (id.isBlank()) return
-        val url = if (id.startsWith("api/")) link else "https://pixeldrain.com/api/file/$id?download"
-        emitDirect(url, "Pixeldrain", callback, "https://pixeldrain.com/")
-    }
-
-    private suspend fun emitDirect(
-        url: String,
-        label: String,
-        callback: (ExtractorLink) -> Unit,
-        referer: String,
-    ) {
+        if (id.isBlank() || id.startsWith("api")) return
+        val url = "https://pixeldrain.com/api/file/$id?download"
         callback(
-            newExtractorLink(name, "$name [$label]", url) {
-                this.quality = mlsbdQualityNum(url)
-                this.referer = referer
+            newExtractorLink(
+                name,
+                SourceStats.decorate("pixeldrain", "${qLabel(mlsbdQualityNum(link))}Pixeldrain"),
+                url
+            ) {
+                this.quality = mlsbdQualityNum(link)
+                this.referer = "https://pixeldrain.com/"
             }
         )
     }
