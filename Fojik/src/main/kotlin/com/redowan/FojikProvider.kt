@@ -159,12 +159,12 @@ class FojikProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        data.split(" ; ").take(3).forEach { item ->
+        for (item in data.split(" ; ").take(3)) {
             val pipe = item.indexOf("|")
-            if (pipe < 0) return@forEach
+            if (pipe < 0) continue
             val quality = item.substring(0, pipe).trim()
             val parts = item.substring(pipe + 1).split("@@")
-            val FU = parts.getOrNull(0)?.trim() ?: return@forEach
+            val FU = parts.getOrNull(0)?.trim() ?: continue
             val action = parts.getOrNull(1)?.trim().orEmpty()
             val FN = parts.getOrNull(2)?.trim().orEmpty()
 
@@ -226,7 +226,7 @@ class FojikProvider : MainAPI() {
                                         ExtractorLink(
                                             this.name,
                                             "${this.name} ${quality.ifEmpty { "Link" }}${if (i > 0) " #${i + 1}" else ""}",
-                                            go, dest, qNum(quality), type = ExtractorLinkType.FILE
+                                            go, dest, qNum(quality), type = ExtractorLinkType.VIDEO
                                         )
                                     )
                                 }
@@ -234,7 +234,7 @@ class FojikProvider : MainAPI() {
                                 callback(
                                     ExtractorLink(
                                         this.name, "${this.name} ${quality.ifEmpty { "Link" }}${if (i > 0) " #${i + 1}" else ""}",
-                                        go, dest, qNum(quality), type = ExtractorLinkType.FILE
+                                        go, dest, qNum(quality), type = ExtractorLinkType.VIDEO
                                     )
                                 )
                             }
@@ -248,7 +248,7 @@ class FojikProvider : MainAPI() {
                         callback(
                             ExtractorLink(
                                 this.name, "${this.name} ${quality.ifEmpty { "Link" }} Page",
-                                f.action, mainUrl, 0, type = ExtractorLinkType.FILE
+                                f.action, mainUrl, 0, type = ExtractorLinkType.VIDEO
                             )
                         )
                     }
