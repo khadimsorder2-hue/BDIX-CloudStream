@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>SkStream Web Player — standalone demo</title>
+<link rel="stylesheet" href="./player.css" />
+<style>
+  body { margin: 0; background: #111111; color: #e9eaee; font-family: Roboto, system-ui, sans-serif; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 19px; font-weight: 700; margin: 18px 0 4px; }
+  p.dim { color: #9ba0a4; font-size: 13.5px; margin: 0 0 16px; line-height: 1.55; }
+  .bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .bar input { flex: 1; min-width: 240px; background: #2B2C30; color: #e9eaee; border: 1px solid #1C1C20; padding: 11px 13px; border-radius: 8px; font-size: 14px; }
+  .bar button { background: #3d50fa; color: #fff; border: 0; font-weight: 600; padding: 11px 18px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .bar button.ghost { background: transparent; border: 1px solid #2B2C30; color: #e9eaee; }
+  .card { background: #161616; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 6px; font-size: 14px; color: #e9eaee; }
+  .card ul { margin: 4px 0 0 18px; padding: 0; color: #9ba0a4; font-size: 13px; line-height: 1.8; }
+  .kbd { background: #2B2C30; border-radius: 4px; padding: 1px 6px; font-size: 12px; color: #e9eaee; }
+  #stage { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 12px; overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,.5); }
+  @media (max-width: 640px) { #stage { aspect-ratio: auto; height: 78vh; border-radius: 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SkStream Web Player <span style="color:#3d50fa">·</span> standalone demo</h1>
+  <p class="dim">Pixel-copy of the CloudStream app player. Paste any direct video / .mkv / .m3u8 URL (or a site URL to route through the local proxy), then press Play. This module is fully standalone — <code>player.css</code> + <code>player.js</code> only.</p>
+
+  <div class="bar">
+    <input id="src" placeholder="https://… (mp4 / mkv / m3u8)" />
+    <button id="go">Play</button>
+    <button id="stop" class="ghost">Stop</button>
+  </div>
+
+  <div id="stage"></div>
+
+  <div class="card" style="margin-top:18px">
+    <h3>Gestures & shortcuts</h3>
+    <ul>
+      <li>Double-tap left / right — <b>±10s</b> · double-tap center — <b>play / pause</b></li>
+      <li>Single tap — controls visible for <b>15s</b> (any touch resets the timer; auto-hide only after 15s with no touch) · long-press — <b>2x speed</b></li>
+      <li>Source chip in the <b>top bar</b> switches server instantly · <b>Fit / Crop / Stretch</b> button on the bottom row</li>
+      <li><span class="kbd">space</span> play/pause · <span class="kbd">←→</span> seek · <span class="kbd">↑↓</span> volume · <span class="kbd">m</span> mute · <span class="kbd">esc</span> back</li>
+      <li>Skip Intro pill appears in the first 85s (for long videos) · loop, lock, PiP in the ⋮ menu</li>
+    </ul>
+  </div>
+</div>
+
+<script src="./player.js"></script>
+<script>
+  var ctrl = null;
+  var stage = document.getElementById("stage");
+  var HEVC = SkStreamPlayer.hevcSupported();
+  console.log("[demo] player v" + SkStreamPlayer.version + " · HEVC:", HEVC);
+
+  document.getElementById("go").onclick = function () {
+    var url = document.getElementById("src").value.trim();
+    if (!url) return;
+    if (ctrl) ctrl.destroy();
+    var isLocal = url.startsWith("/");
+    ctrl = SkStreamPlayer.mount(stage, {
+      links: [{ label: "Demo source", url: url, quality: 0, referer: isLocal ? "" : location.origin }],
+      title: "SkStream Web Player",
+      subtitle: HEVC ? "HEVC: supported · mkv: native/remux" : "HEVC: NOT supported by this browser",
+      autoPlay: true,
+      skipIntro: [0, 85],
+      onBack: function () { if (ctrl) { ctrl.destroy(); ctrl = null; } },
+      onProgress: function (p) { console.log("progress", p.position.toFixed(1) + "s"); },
+    });
+  };
+  document.getElementById("stop").onclick = function () { if (ctrl) { ctrl.destroy(); ctrl = null; } };
+  document.getElementById("src").addEventListener("keydown", function (e) { if (e.key === "Enter") document.getElementById("go").click(); });
+</script>
+</body>
+</html>
