@@ -18,7 +18,9 @@ import java.net.URI
  *   2) POST {FU2}             -> sharelink-*.shop/dld2.php?i=… (form relay)
  *   3) POST {FU2}             -> freethemesy.shop/dld2.php  (page holds var sss)
  *   4) POST {s: sss, v: tok}  -> <origin>/new/l/api/m       -> technews24 links page
- *   5) go.php/go2.php?i=…     -> auto-submit form            -> final GDrive/host
+ *   5) go2.php?i=…&hash=…     -> FU5/FU7 relays -> READWEB(sss/v/vurl)
+ *   6) POST JSON {s,v} -> <origin>/l/api/m -> cdn-hub /url? -> /embed? 302 = direct file
+ * Verified live 2026-10.
  * Every relay page is parsed generically (first <form> + hidden inputs), so a
  * host swap never breaks the chain.
  */
@@ -153,6 +155,55 @@ class FojikProvider : MainAPI() {
         return app.post(url, requestBody = body, headers = mapOf("Referer" to referer, "User-Agent" to headers["User-Agent"]!!), timeout = 25000L)
     }
 
+    /**
+     * go2.php?i=..&hash=.. chain (verified live 2026-10):
+     *   GET go2            -> auto-form FU5 (sharelink-*.shop/dld2.php)
+     *   POST FU5           -> auto-form FU7 (.../dld2/)
+     *   POST FU7           -> READWEB page: sss + v + vurl=atob('/l/api/m')
+     *   POST JSON {s,v}    -> <origin>/l/api/m -> cdn.cdn-hub.xyz/url?photo=...
+     *   /url? -> /embed?   -> 302 -> googleusercontent DIRECT file (playable)
+     * Returns the final playable URL or null.
+     */
+    private suspend fun resolveGoChain(goUrl: String, referer: String): String? {
+        return try {
+            var g = app.get(goUrl, headers = mapOf("Referer" to referer, "User-Agent" to headers["User-Agent"]!!), timeout = 20000L)
+            var gform = firstForm(g.text)
+            var gguard = 0
+            while (gform != null && gform.action.isNotEmpty() && gguard++ < 4 &&
+                !g.text.contains(Regex("var\\s+sss"))
+            ) {
+                g = postForm(gform.action, gform.fields, g.url)
+                gform = firstForm(g.text)
+            }
+            val sss = Regex("var\\s+sss\\s*=\\s*'([^']+)'").find(g.text)?.groupValues?.get(1)
+                ?: return null
+            val v = Regex("v:\\s*'([^']+)'").find(g.text)?.groupValues?.get(1).orEmpty()
+            val vurlB64 = Regex("var\\s+vurl\\s*=\\s*atob\\('([^']+)'\\)").find(g.text)?.groupValues?.get(1)
+                ?: return null
+            val vurl = String(java.util.Base64.getDecoder().decode(vurlB64 + "==="))
+            val origin = URI(g.url).let { "${it.scheme}://${it.host}" }
+            // JSON api -> cdn-hub /url?photo=...
+            val destResp = app.post(
+                origin + vurl,
+                json = mapOf("s" to sss, "v" to v),
+                headers = mapOf(
+                    "Referer" to g.url,
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "User-Agent" to headers["User-Agent"]!!
+                ),
+                timeout = 20000L
+            ).text.trim()
+            if (!destResp.startsWith("http")) return null
+            val embed = if (destResp.contains("/url?")) destResp.replace("/url?", "/embed?") else destResp
+            // follow the one-shot 302 NOW — the Location is a long-lived
+            // googleusercontent signed url that plays with any UA/referer
+            val fr = app.get(embed, headers = mapOf("Referer" to origin + "/", "User-Agent" to headers["User-Agent"]!!), timeout = 25000L)
+            if (fr.url.contains("google")) fr.url else embed
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -187,54 +238,38 @@ class FojikProvider : MainAPI() {
                     // final api — returns destination url as plain text
                     val dest = postForm(
                         "$origin/new/l/api/m",
-                        mapOf("s" to sss, "v" to "6ad99d6354708"),
+                        mapOf("s" to sss, "v" to (Regex("v:\\s*'([^']+)'").find(resp.text)?.groupValues?.get(1) ?: "6ad99d6354708")),
                         resp.url
                     ).text.trim()
                     if (dest.startsWith("http")) {
                         // links page → go.php/go2.php hops
                         val linksDoc = app.get(dest, headers = mapOf("Referer" to "https://freethemesy.shop/", "User-Agent" to headers["User-Agent"]!!), timeout = 25000L)
-                        val goLinks = Regex("https://[a-z.]*technews24\\.(?:site|me)/go2?\\.php\\?i=[A-Za-z0-9+/=_-]+")
-                            .findAll(linksDoc.text).map { it.value }.distinct().take(8).toList()
+                        val goLinks = Regex("https://[a-z.]*technews24\\.(?:site|me)/go2?\\.php\\?i=[A-Za-z0-9+/=_-]+(?:&hash=[A-Za-z0-9+/=_%-]+)?")
+                            .findAll(linksDoc.text.replace("&amp;", "&")).map { it.value }.distinct().toList()
                         if (goLinks.isEmpty()) {
                             // links page itself might already be the final host page
                             loadExtractor(dest, mainUrl, subtitleCallback, callback)
                             continue
                         }
-                        goLinks.forEachIndexed { i, go ->
-                            // follow the auto-submit form (1-2 hops) — device okhttp passes CF
-                            try {
-                                var g = app.get(go, headers = mapOf("Referer" to dest, "User-Agent" to headers["User-Agent"]!!), timeout = 20000L)
-                                var gform = firstForm(g.text)
-                                var gguard = 0
-                                while (gform != null && gform.action.isNotEmpty() && gguard++ < 3) {
-                                    g = postForm(gform.action, gform.fields, g.url)
-                                    gform = firstForm(g.text)
-                                }
-                                // final page — hand to extractors (gdrive/hubcloud/gdflix/…)
-                                val finalUrl = Regex("https?://[^\\s\"'<>]+").findAll(g.text)
-                                    .map { it.value }
-                                    .firstOrNull { u ->
-                                        !u.contains("technews24") && !u.contains("fonts.googleapis") &&
-                                            !u.contains("cloudflare") && !u.contains("sharelink")
-                                    }
-                                if (finalUrl != null) {
-                                    loadExtractor(finalUrl, g.url, subtitleCallback, callback)
-                                } else if (g.url.contains("drive.google") || g.url.contains("hubcloud") || g.url.contains("gdflix")) {
-                                    loadExtractor(g.url, mainUrl, subtitleCallback, callback)
-                                } else {
-                                    callback(
-                                        ExtractorLink(
-                                            this.name,
-                                            "${this.name} ${quality.ifEmpty { "Link" }}${if (i > 0) " #${i + 1}" else ""}",
-                                            go, dest, qNum(quality), type = ExtractorLinkType.VIDEO
-                                        )
-                                    )
-                                }
-                            } catch (_: Exception) {
+                        // ONE go2 link per quality row — every go link of a row
+                        // funnels into the same cdn-hub file, so resolve only
+                        // the first (the chain is ~8 requests deep).
+                        goLinks.firstOrNull()?.let { go ->
+                            val resolved = resolveGoChain(go, dest)
+                            if (resolved != null) {
                                 callback(
                                     ExtractorLink(
-                                        this.name, "${this.name} ${quality.ifEmpty { "Link" }}${if (i > 0) " #${i + 1}" else ""}",
-                                        go, dest, qNum(quality), type = ExtractorLinkType.VIDEO
+                                        this.name,
+                                        "${this.name} ${quality.ifEmpty { "Link" }} Google Server",
+                                        resolved, "", qNum(quality), type = ExtractorLinkType.VIDEO
+                                    )
+                                )
+                            } else {
+                                // unresolved — expose the relay as a page link
+                                callback(
+                                    ExtractorLink(
+                                        this.name, "${this.name} ${quality.ifEmpty { "Link" }} Page",
+                                        go, dest, 0, type = ExtractorLinkType.VIDEO
                                     )
                                 )
                             }
