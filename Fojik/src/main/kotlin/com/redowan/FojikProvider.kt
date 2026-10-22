@@ -3,6 +3,7 @@ package com.redowan
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.nicehttp.NiceResponse
 import okhttp3.FormBody
 import org.jsoup.Jsoup
 import java.net.URI
